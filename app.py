@@ -1,17 +1,16 @@
 """
 🤖 ChatGPT-Style AI Assistant with Real-Time Web Search
 A conversational AI that answers any question using web search and fact-checking
+Uses Groq and Tavily APIs directly for reliable performance
 """
 
 import streamlit as st
 import os
 from typing import Dict, Any, List
-from langchain_openai import ChatOpenAI
-from crewai import Crew, Task, Agent
-from crewai_tools import TavilySearchTool
-import time
-from datetime import datetime
+from groq import Groq
+from tavily import TavilyClient
 from dotenv import load_dotenv
+import json
 
 # Load environment variables
 load_dotenv()
@@ -53,81 +52,38 @@ if 'groq_api_key' not in st.session_state:
 if 'tavily_api_key' not in st.session_state:
     st.session_state.tavily_api_key = os.getenv("TAVILY_API_KEY", "")
 
-def initialize_llm(api_key: str, model: str = "llama3-8b-8192"):
-    """Initialize the LLM with Groq - properly configured for CrewAI"""
-    # CRITICAL: CrewAI needs OPENAI_API_KEY set because it converts ChatOpenAI to its native LLM
-    # Since Groq uses OpenAI-compatible API, we can set OPENAI_API_KEY to the Groq key
-    # BUT we must ensure the ChatOpenAI instance points to Groq's endpoint
-    os.environ["OPENAI_API_KEY"] = api_key
-    
-    # Create LangChain ChatOpenAI instance configured for Groq
-    # This MUST use Groq's endpoint, not OpenAI's default
-    llm = ChatOpenAI(
-        openai_api_base="https://api.groq.com/openai/v1",  # Groq's OpenAI-compatible endpoint
-        openai_api_key=api_key,  # Groq API key
-        model_name=model,  # Model name
-        temperature=0.7,
-        max_tokens=2000,
-    )
-    
-    return llm
-
-def setup_web_search(tavily_api_key: str):
-    """Setup web search tool using CrewAI's TavilySearchTool"""
-    os.environ["TAVILY_API_KEY"] = tavily_api_key
-    return TavilySearchTool()
-
-def create_research_agent(llm: ChatOpenAI, web_search_tool: Any):
-    """Create Research Agent for web search"""
-    return Agent(
-        role='Expert Researcher and Web Search Specialist',
-        goal='Search the web for current, accurate information on any topic and provide comprehensive, fact-checked answers',
-        backstory=(
-            "You are an expert researcher with access to real-time web search. "
-            "You excel at finding accurate, up-to-date information from the internet. "
-            "You always verify facts from multiple sources and provide well-sourced answers. "
-            "You can answer questions about ANY topic - current events, history, science, technology, culture, and more."
-        ),
-        verbose=False,  # Reduced verbosity for cleaner output
-        allow_delegation=False,
-        llm=llm,  # Pass the configured LLM directly
-        tools=[web_search_tool]
-    )
-
-def create_answer_agent(llm: ChatOpenAI):
-    """Create Answer Agent for ChatGPT-like responses"""
-    return Agent(
-        role='Helpful AI Assistant',
-        goal='Provide clear, conversational, and accurate answers to user questions in a friendly, ChatGPT-like manner',
-        backstory=(
-            "You are a helpful AI assistant similar to ChatGPT. "
-            "You provide clear, conversational answers to any question. "
-            "You are friendly, knowledgeable, and always aim to be helpful. "
-            "You format your answers in a natural, easy-to-read way with proper paragraphs and structure."
-        ),
-        verbose=False,
-        allow_delegation=False,
-        llm=llm
-    )
-
-def create_fact_checker_agent(llm: ChatOpenAI, web_search_tool: Any):
-    """Create Fact Checker Agent"""
-    return Agent(
-        role='Fact Verification Specialist',
-        goal='Verify all facts in the answer by cross-checking with web sources',
-        backstory=(
-            "You are an expert fact-checker. "
-            "You verify every factual claim against current web sources. "
-            "You ensure accuracy and provide corrections if needed."
-        ),
-        verbose=False,
-        allow_delegation=False,
-        llm=llm,
-        tools=[web_search_tool]
-    )
+def search_web(query: str, tavily_client: TavilyClient, max_results: int = 5) -> str:
+    """Search the web using Tavily and return formatted results"""
+    try:
+        response = tavily_client.search(
+            query=query,
+            max_results=max_results,
+            search_depth="advanced"
+        )
+        
+        # Format results for the LLM
+        formatted_results = []
+        if 'results' in response:
+            for result in response['results']:
+                formatted_results.append({
+                    'title': result.get('title', 'No title'),
+                    'url': result.get('url', 'No URL'),
+                    'content': result.get('content', 'No content')
+                })
+        
+        # Create a readable summary
+        summary = "Web Search Results:\n\n"
+        for i, result in enumerate(formatted_results, 1):
+            summary += f"{i}. {result['title']}\n"
+            summary += f"   URL: {result['url']}\n"
+            summary += f"   Content: {result['content'][:500]}...\n\n"
+        
+        return summary if formatted_results else f"No results found for: {query}"
+    except Exception as e:
+        return f"Error searching web: {str(e)}"
 
 def get_ai_response(query: str, groq_api_key: str, tavily_api_key: str, model: str = "llama3-8b-8192"):
-    """Get AI response using CrewAI agents"""
+    """Get AI response using Groq and Tavily directly"""
     try:
         # Validate API keys first
         if not groq_api_key or groq_api_key.strip() == "":
@@ -143,90 +99,63 @@ def get_ai_response(query: str, groq_api_key: str, tavily_api_key: str, model: s
         if not tavily_api_key.startswith('tvly-'):
             return "❌ Error: Invalid Tavily API key format. Tavily keys should start with 'tvly-'. Please check your key."
         
-        # Initialize LLM and tools
-        llm = initialize_llm(groq_api_key, model)
-        web_search_tool = setup_web_search(tavily_api_key)
-        
-        # Create agents
-        research_agent = create_research_agent(llm, web_search_tool)
-        answer_agent = create_answer_agent(llm)
-        fact_checker_agent = create_fact_checker_agent(llm, web_search_tool)
-        
-        # Create tasks with clear instructions
-        research_task = Task(
-            description=f"Search the web for comprehensive information about: {query}. "
-                       f"Use your web search tool to find current, accurate information from multiple sources. "
-                       f"Gather detailed information about this topic.",
-            expected_output="Detailed research findings with sources from web search",
-            agent=research_agent,
-        )
-        
-        answer_task = Task(
-            description=f"Based on the research about '{query}', provide a clear, conversational answer. "
-                       f"Write naturally and helpfully, like ChatGPT. "
-                       f"Make it well-structured with proper paragraphs. "
-                       f"Be friendly and informative.",
-            expected_output="A clear, conversational answer to the user's question",
-            agent=answer_agent,
-            context=[research_task]
-        )
-        
-        fact_check_task = Task(
-            description=f"Review the answer about '{query}' and verify all facts using web search. "
-                       f"Cross-check any claims or statistics. "
-                       f"Provide the final verified, accurate answer.",
-            expected_output="A fact-checked, accurate, and verified answer",
-            agent=fact_checker_agent,
-            context=[answer_task]
-        )
-        
-        # Create crew
-        crew = Crew(
-            agents=[research_agent, answer_agent, fact_checker_agent],
-            tasks=[research_task, answer_task, fact_check_task],
-            verbose=False,
-            max_iter=3,
-            max_rpm=10
-        )
-        
-        # Execute with timeout handling
+        # Initialize clients
         try:
-            # CRITICAL: CrewAI needs OPENAI_API_KEY set to the Groq key
-            # because Groq uses OpenAI-compatible API
-            # The LLM instance already points to Groq's endpoint
-            os.environ["OPENAI_API_KEY"] = groq_api_key
-            
-            # Execute crew
-            result = crew.kickoff(inputs={"query": query})
+            groq_client = Groq(api_key=groq_api_key)
+            tavily_client = TavilyClient(api_key=tavily_api_key)
         except Exception as e:
-            error_msg = str(e)
-            if "401" in error_msg or "invalid_api_key" in error_msg.lower() or "authentication" in error_msg.lower():
-                return "❌ Error: API key authentication failed.\n\n**Please verify:**\n1. Your Groq API key is correct (starts with 'gsk_')\n2. Your Tavily API key is correct (starts with 'tvly-')\n3. Keys are entered correctly in the sidebar\n4. Keys are active and not expired\n\n**Get free keys:**\n- Groq: https://console.groq.com/\n- Tavily: https://tavily.com/"
-            elif "rate limit" in error_msg.lower() or "429" in error_msg:
-                return "⚠️ Error: Rate limit exceeded. Please wait a moment and try again."
-            elif "openai" in error_msg.lower() and "api" in error_msg.lower():
-                return "❌ Error: Configuration issue detected. The system is trying to use OpenAI instead of Groq.\n\n**Solution:**\n1. Make sure your Groq API key is entered in the sidebar\n2. The key should start with 'gsk_'\n3. Try refreshing the page and re-entering your keys"
-            else:
-                return f"❌ Error: {error_msg}\n\nPlease check your API keys and try again."
+            return f"❌ Error initializing API clients: {str(e)}"
         
-        # Extract result
-        if hasattr(result, 'raw') and result.raw:
-            return str(result.raw)
-        elif hasattr(result, 'content') and result.content:
-            return str(result.content)
-        elif hasattr(result, 'tasks_output') and result.tasks_output:
-            if isinstance(result.tasks_output, list) and len(result.tasks_output) > 0:
-                return str(result.tasks_output[-1])
-            else:
-                return str(result.tasks_output)
-        elif isinstance(result, dict):
-            return result.get('output', result.get('result', str(result)))
-        else:
-            result_str = str(result)
-            if len(result_str.strip()) < 10:
-                return "⚠️ Response generated but was too short. Please try again or rephrase your question."
-            return result_str
-            
+        # Step 1: Search the web for current information
+        with st.spinner("🔍 Searching the web..."):
+            web_results = search_web(query, tavily_client)
+        
+        # Step 2: Create prompt with web search results
+        system_prompt = """You are a helpful AI assistant that answers questions using web search results.
+You provide accurate, up-to-date information based on the search results provided.
+Be conversational, clear, and cite sources when relevant.
+If the search results don't contain enough information, say so honestly."""
+        
+        user_prompt = f"""Question: {query}
+
+{web_results}
+
+Please provide a clear, accurate answer to the question based on the web search results above.
+If the search results contain relevant information, use it. If not, provide a general answer if you know it, or say you need more information.
+Make your answer conversational and well-structured."""
+        
+        # Step 3: Get response from Groq
+        with st.spinner("🤖 Generating answer..."):
+            try:
+                # Use Groq's chat completion API
+                completion = groq_client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.7,
+                    max_tokens=2000,
+                    top_p=1,
+                )
+                
+                # Extract response
+                response = completion.choices[0].message.content
+                
+                if not response or len(response.strip()) < 10:
+                    return "⚠️ Response generated but was too short. Please try again or rephrase your question."
+                
+                return response
+                
+            except Exception as e:
+                error_msg = str(e)
+                if "401" in error_msg or "invalid_api_key" in error_msg.lower() or "authentication" in error_msg.lower():
+                    return "❌ Error: API key authentication failed.\n\n**Please verify:**\n1. Your Groq API key is correct (starts with 'gsk_')\n2. Your Tavily API key is correct (starts with 'tvly-')\n3. Keys are entered correctly in the sidebar\n4. Keys are active and not expired\n\n**Get free keys:**\n- Groq: https://console.groq.com/\n- Tavily: https://tavily.com/"
+                elif "rate limit" in error_msg.lower() or "429" in error_msg:
+                    return "⚠️ Error: Rate limit exceeded. Please wait a moment and try again."
+                else:
+                    return f"❌ Error calling Groq API: {error_msg}\n\nPlease check your API keys and try again."
+                    
     except Exception as e:
         import traceback
         error_detail = traceback.format_exc()
@@ -315,7 +244,7 @@ def main():
         # Model selection
         model = st.selectbox(
             "🤖 Model",
-            ["llama3-8b-8192", "llama3-70b-8192", "mixtral-8x7b-32768"],
+            ["llama3-8b-8192", "llama3-70b-8192", "mixtral-8x7b-32768", "openai/gpt-oss-20b"],
             index=0,
             help="Select the AI model (llama3-8b-8192 is fastest)"
         )
@@ -373,8 +302,7 @@ def main():
         
         # Generate response
         with st.chat_message("assistant"):
-            with st.spinner("🔍 Searching the web and thinking..."):
-                response = get_ai_response(prompt, groq_api_key, tavily_api_key, model)
+            response = get_ai_response(prompt, groq_api_key, tavily_api_key, model)
             
             # Display response
             message_placeholder = st.empty()
