@@ -7,11 +7,14 @@ Uses Groq and Tavily APIs directly for reliable performance
 
 import streamlit as st
 import os
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 from groq import Groq
 from tavily import TavilyClient
 from dotenv import load_dotenv
 import re
+import io
+from pypdf import PdfReader
+from docx import Document
 
 # Load environment variables
 load_dotenv()
@@ -59,6 +62,9 @@ if 'groq_api_key' not in st.session_state:
 if 'tavily_api_key' not in st.session_state:
     st.session_state.tavily_api_key = os.getenv("TAVILY_API_KEY", "")
 
+if 'uploaded_documents' not in st.session_state:
+    st.session_state.uploaded_documents = []  # List of {name: str, content: str}
+
 def is_law_question(query: str) -> bool:
     """Detect if a question is law-related"""
     law_keywords = [
@@ -68,10 +74,76 @@ def is_law_question(query: str) -> bool:
         'common law', 'equity', 'judgment', 'ruling', 'appeal', 'conviction',
         'crime', 'criminal', 'civil', 'contractual', 'tortious', 'sue', 'sued',
         'litigation', 'lawsuit', 'legal advice', 'legal problem', 'legal question',
-        'jurisprudence', 'legal principle', 'rule of law', 'obiter dicta', 'ratio decidendi'
+        'jurisprudence', 'legal principle', 'rule of law', 'obiter dicta', 'ratio decidendi',
+        'advice', 'advise', 'counsel'
     ]
     query_lower = query.lower()
     return any(keyword in query_lower for keyword in law_keywords)
+
+def is_informal_question(query: str) -> bool:
+    """Detect if a question is informal (contains emojis or casual language)"""
+    # Check for emojis (common emoji patterns)
+    emoji_pattern = re.compile(
+        "["
+        "\U0001F600-\U0001F64F"  # emoticons
+        "\U0001F300-\U0001F5FF"  # symbols & pictographs
+        "\U0001F680-\U0001F6FF"  # transport & map symbols
+        "\U0001F1E0-\U0001F1FF"  # flags
+        "\U00002702-\U000027B0"  # dingbats
+        "\U000024C2-\U0001F251"
+        "]+"
+    )
+    has_emoji = bool(emoji_pattern.search(query))
+    
+    # Check for casual language patterns
+    casual_patterns = ['lol', 'omg', 'haha', 'whats up', 'hey', 'sup', 'thx', 'thanks', 'pls', 'please']
+    has_casual = any(pattern in query.lower() for pattern in casual_patterns)
+    
+    return has_emoji or has_casual
+
+def extract_text_from_pdf(file) -> str:
+    """Extract text from PDF file"""
+    try:
+        pdf_reader = PdfReader(file)
+        text = ""
+        for page in pdf_reader.pages:
+            text += page.extract_text() + "\n"
+        return text
+    except Exception as e:
+        return f"Error reading PDF: {str(e)}"
+
+def extract_text_from_docx(file) -> str:
+    """Extract text from DOCX file"""
+    try:
+        doc = Document(file)
+        text = "\n".join([paragraph.text for paragraph in doc.paragraphs])
+        return text
+    except Exception as e:
+        return f"Error reading DOCX: {str(e)}"
+
+def extract_text_from_file(uploaded_file) -> str:
+    """Extract text from uploaded file based on type"""
+    file_type = uploaded_file.name.split('.')[-1].lower()
+    
+    if file_type == 'pdf':
+        return extract_text_from_pdf(uploaded_file)
+    elif file_type in ['docx', 'doc']:
+        return extract_text_from_docx(uploaded_file)
+    elif file_type in ['txt', 'text']:
+        return str(uploaded_file.read(), "utf-8")
+    else:
+        return f"Unsupported file type: {file_type}"
+
+def is_advice_request(query: str) -> bool:
+    """Detect if query is requesting legal advice"""
+    advice_patterns = [
+        'could you advice', 'can you advice', 'would you advice',
+        'could you advise', 'can you advise', 'would you advise',
+        'give me advice', 'provide advice', 'need advice',
+        'should i', 'what should', 'how should'
+    ]
+    query_lower = query.lower()
+    return any(pattern in query_lower for pattern in advice_patterns)
 
 def search_web(query: str, tavily_client: TavilyClient, max_results: int = 5, search_type: str = "general") -> Tuple[str, List[Dict]]:
     """Search the web using Tavily and return formatted results with source links"""
@@ -195,8 +267,16 @@ CRITICAL RULES:
 5. You MUST follow IRAC (Issue, Rule, Analysis, Conclusion) methodology
 6. You MUST use OSCOLA citation format for ALL cases and statutes
 7. ALL citations must be VERIFIED from the sources - NO FABRICATED CITATIONS
-8. Use formal, objective legal language
-9. If unsure about any fact, state the uncertainty clearly"""
+8. Use formal, objective legal language like a professional lawyer
+9. If unsure about any fact, state the uncertainty clearly
+10. GRAMMAR AND WRITING REQUIREMENTS:
+    - Grammar MUST be accurate and professional
+    - Answer MUST be comprehensive - address ALL aspects of the issue
+    - Logic MUST be complete - no missing logical steps
+    - If you start discussing an issue, you MUST complete the analysis to the end
+    - Use precise legal terminology
+    - Ensure proper sentence structure and flow
+    - Every paragraph must logically connect to the next"""
 
     user_prompt = f"""CRITICAL: Answer this legal question using ONLY information found in the sources below. DO NOT make up facts, cases, or citations. ALL cases, statutes, and legal principles MUST be REAL and found in the sources.
 
@@ -312,6 +392,11 @@ Generate your answer now, ensuring:
         
         response = completion.choices[0].message.content
         
+        # Add legal advice disclaimer if advice was requested
+        if is_advice_request(query):
+            disclaimer = "\n\n---\n\n**⚠️ LEGAL DISCLAIMER:**\n\nThis response is provided for informational and educational purposes only. It does not constitute professional legal advice and should not be relied upon as such. The information provided is not from a qualified legal professional, and no legal responsibility is assumed. For specific legal matters, please consult with a qualified solicitor or barrister who can provide professional legal advice tailored to your circumstances."
+            response = disclaimer + "\n\n---\n\n" + response
+        
         # Add source links section at the end
         if all_sources:
             response += "\n\n---\n\n**📚 Sources Referenced:**\n\n"
@@ -357,7 +442,14 @@ CRITICAL RULES:
 4. If information is not in sources, explicitly state this
 5. Be conversational but accurate
 6. Always cite which source supports each claim
-7. If unsure, state your uncertainty clearly"""
+7. If unsure, state your uncertainty clearly
+8. GRAMMAR AND WRITING REQUIREMENTS:
+   - Grammar MUST be accurate and professional
+   - Answer MUST be comprehensive - address ALL aspects of the question
+   - Logic MUST be complete - no missing logical steps
+   - If you start discussing a point, you MUST complete it to the end
+   - Ensure proper sentence structure and flow
+   - Every paragraph must logically connect to the next"""
 
     user_prompt = f"""CRITICAL: Answer this question using ONLY information found in the sources below. Cross-reference sources for accuracy.
 
@@ -421,7 +513,111 @@ Generate your answer now, ensuring EVERY claim is verified against the sources:"
         else:
             return f"❌ Error generating answer: {error_msg}"
 
-def get_ai_response(query: str, groq_api_key: str, tavily_api_key: str, model: str = "llama-3.1-8b-instant"):
+def get_answer_with_documents(query: str, groq_client: Groq, tavily_client: TavilyClient, model: str, documents: List[Dict], is_law: bool, is_informal: bool) -> str:
+    """Generate answer using uploaded documents combined with web search"""
+    
+    # Combine document content
+    doc_sources_text = ""
+    if documents:
+        doc_sources_text = "=== UPLOADED DOCUMENTS ===\n\n"
+        for i, doc in enumerate(documents, 1):
+            doc_sources_text += f"--- Document {i}: {doc['name']} ---\n{doc['content'][:2000]}...\n\n"
+    
+    # Perform web search
+    with st.spinner("🔍 Searching web and cross-referencing with uploaded documents..."):
+        web_results, web_sources = search_web(query, tavily_client, max_results=8 if is_law else 5, search_type="law" if is_law else "general")
+        all_web_sources = comprehensive_search(query, tavily_client, search_type="law" if is_law else "general")
+        
+        # Combine all sources
+        seen_urls = {s['url'] for s in all_web_sources}
+        for source in web_sources:
+            if source['url'] not in seen_urls:
+                all_web_sources.append(source)
+    
+    # Format web sources
+    web_sources_text = "\n\n".join([
+        f"=== Web Source {i+1}: {s['title']} ===\nURL: {s['url']}\nContent: {s['content'][:600]}\n"
+        for i, s in enumerate(all_web_sources[:12])
+    ])
+    
+    # Create combined prompt
+    if is_law:
+        system_prompt = """You are a legal expert AI assistant. Answer questions using BOTH uploaded documents AND web sources. 
+Pinpoint which document or web source supports each point. Use OSCOLA citations for legal points from documents or web sources.
+Grammar must be accurate, answer comprehensive, logic complete. If starting an issue, complete it fully."""
+        
+        user_prompt = f"""Legal Question: {query}
+
+{doc_sources_text}
+
+=== WEB SOURCES (Cross-reference with documents) ===
+{web_sources_text}
+
+INSTRUCTIONS:
+1. Use information from BOTH uploaded documents AND web sources
+2. For law questions: Use OSCOLA citations in parentheses after relevant points: (Document 1), (Web Source 2), or (Case Name [Year])
+3. Pinpoint exact sources: "According to Document 1..." or "Web Source 3 states..."
+4. Cross-reference between documents and web sources
+5. Grammar must be accurate, answer comprehensive, logic complete
+6. If starting an issue, complete it fully
+7. Write like a professional lawyer
+
+Generate comprehensive answer with source pinpointing:"""
+    else:
+        system_prompt = """You are a helpful AI assistant. Answer questions using BOTH uploaded documents AND web sources. 
+Pinpoint which document or web source supports each point. Grammar must be accurate, answer comprehensive, logic complete."""
+        
+        user_prompt = f"""Question: {query}
+
+{doc_sources_text}
+
+=== WEB SOURCES (Cross-reference with documents) ===
+{web_sources_text}
+
+INSTRUCTIONS:
+1. Use information from BOTH uploaded documents AND web sources
+2. Pinpoint exact sources: "According to Document 1..." or "Web Source 2 states..."
+3. Grammar must be accurate, answer comprehensive, logic complete
+4. If starting a point, complete it fully
+5. {'Use emojis if appropriate for informal tone.' if is_informal else 'Maintain professional tone.'}
+
+Generate comprehensive answer with source pinpointing:"""
+    
+    try:
+        completion = groq_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.3 if is_law else 0.5,
+            max_tokens=4000 if is_law else 2500,
+            top_p=0.8 if is_law else 0.9,
+        )
+        
+        response = completion.choices[0].message.content
+        
+        # Add legal advice disclaimer if needed
+        if is_law and is_advice_request(query):
+            disclaimer = "\n\n---\n\n**⚠️ LEGAL DISCLAIMER:**\n\nThis response is provided for informational and educational purposes only. It does not constitute professional legal advice and should not be relied upon as such. The information provided is not from a qualified legal professional, and no legal responsibility is assumed. For specific legal matters, please consult with a qualified solicitor or barrister who can provide professional legal advice tailored to your circumstances."
+            response = disclaimer + "\n\n---\n\n" + response
+        
+        # Add source list
+        response += "\n\n---\n\n**📚 Sources Used:**\n\n"
+        if documents:
+            response += "**Uploaded Documents:**\n"
+            for i, doc in enumerate(documents, 1):
+                response += f"{i}. {doc['name']}\n"
+        if all_web_sources:
+            response += "\n**Web Sources:**\n"
+            for i, source in enumerate(all_web_sources[:10], 1):
+                response += f"{i}. [{source['title']}]({source['url']})\n"
+        
+        return response
+    except Exception as e:
+        return f"❌ Error: {str(e)}"
+
+def get_ai_response(query: str, groq_api_key: str, tavily_api_key: str, model: str = "llama-3.1-8b-instant", documents: Optional[List[Dict]] = None):
     """Get AI response using Groq and Tavily directly with specialized handling for law questions"""
     try:
         # Validate API keys first
@@ -445,22 +641,28 @@ def get_ai_response(query: str, groq_api_key: str, tavily_api_key: str, model: s
         except Exception as e:
             return f"❌ Error initializing API clients: {str(e)}"
         
-        # Detect if this is a law question
+        # Detect question type
         is_law = is_law_question(query)
+        is_informal = is_informal_question(query)
         search_type = "law" if is_law else "general"
         
-        # Step 1: Initial search for current information
-        search_status = "🔍 Searching legal databases and scholarly sources..." if is_law else "🔍 Searching the web..."
-        with st.spinner(search_status):
-            web_results, initial_sources = search_web(query, tavily_client, max_results=8 if is_law else 5, search_type=search_type)
-        
-        # Step 2: Generate appropriate response with comprehensive fact-checking
-        if is_law:
-            with st.spinner("⚖️ Cross-referencing legal sources and generating verified IRAC-structured answer..."):
-                response = get_law_answer(query, groq_client, tavily_client, model, initial_sources)
+        # If documents are provided, use document-based answering
+        if documents and len(documents) > 0:
+            with st.spinner("📄 Analyzing documents and cross-referencing with web sources..."):
+                response = get_answer_with_documents(query, groq_client, tavily_client, model, documents, is_law, is_informal)
         else:
-            with st.spinner("🤖 Cross-checking facts and generating verified answer..."):
-                response = get_general_answer(query, groq_client, tavily_client, model, initial_sources)
+            # Step 1: Initial search for current information
+            search_status = "🔍 Searching legal databases and scholarly sources..." if is_law else "🔍 Searching the web..."
+            with st.spinner(search_status):
+                web_results, initial_sources = search_web(query, tavily_client, max_results=8 if is_law else 5, search_type=search_type)
+            
+            # Step 2: Generate appropriate response with comprehensive fact-checking
+            if is_law:
+                with st.spinner("⚖️ Cross-referencing legal sources and generating verified IRAC-structured answer..."):
+                    response = get_law_answer(query, groq_client, tavily_client, model, initial_sources)
+            else:
+                with st.spinner("🤖 Cross-checking facts and generating verified answer..."):
+                    response = get_general_answer(query, groq_client, tavily_client, model, initial_sources)
         
         if not response or len(response.strip()) < 10:
             return "⚠️ Response generated but was too short. Please try again or rephrase your question."
@@ -626,7 +828,10 @@ def main():
         
         # Generate response
         with st.chat_message("assistant"):
-            response = get_ai_response(prompt, groq_api_key, tavily_api_key, model)
+            # Get documents if available
+            documents = st.session_state.uploaded_documents if st.session_state.uploaded_documents else None
+            
+            response = get_ai_response(prompt, groq_api_key, tavily_api_key, model, documents)
             
             # Display response
             message_placeholder = st.empty()
