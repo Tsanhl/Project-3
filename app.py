@@ -55,20 +55,23 @@ if 'tavily_api_key' not in st.session_state:
 
 def initialize_llm(api_key: str, model: str = "llama3-8b-8192"):
     """Initialize the LLM with Groq - properly configured for CrewAI"""
-    # IMPORTANT: CrewAI needs the API key in environment for Groq
-    # Since Groq uses OpenAI-compatible API, we set OPENAI_API_KEY
-    # But we MUST use the custom base URL in the ChatOpenAI instance
-    os.environ["OPENAI_API_KEY"] = api_key
+    # IMPORTANT: Use the correct parameter names for langchain_openai.ChatOpenAI
+    # We use openai_api_base and openai_api_key to point to Groq
     
     # Create LangChain ChatOpenAI instance configured for Groq
-    # This ensures it uses Groq's endpoint, not OpenAI's
+    # This MUST use Groq's endpoint, not OpenAI's default
     llm = ChatOpenAI(
-        openai_api_base="https://api.groq.com/openai/v1",
-        openai_api_key=api_key,
-        model_name=model,
+        openai_api_base="https://api.groq.com/openai/v1",  # Groq's OpenAI-compatible endpoint
+        openai_api_key=api_key,  # Groq API key
+        model_name=model,  # Model name
         temperature=0.7,
         max_tokens=2000,
     )
+    
+    # IMPORTANT: Remove OPENAI_API_KEY from env to prevent CrewAI from using OpenAI
+    # CrewAI might check this and create its own client
+    if "OPENAI_API_KEY" in os.environ:
+        del os.environ["OPENAI_API_KEY"]
     
     return llm
 
@@ -191,13 +194,19 @@ def get_ai_response(query: str, groq_api_key: str, tavily_api_key: str, model: s
         
         # Execute with timeout handling
         try:
+            # Make sure OPENAI_API_KEY is not set (it causes CrewAI to use OpenAI instead of our Groq LLM)
+            if "OPENAI_API_KEY" in os.environ:
+                del os.environ["OPENAI_API_KEY"]
+            
             result = crew.kickoff(inputs={"query": query})
         except Exception as e:
             error_msg = str(e)
             if "401" in error_msg or "invalid_api_key" in error_msg.lower() or "authentication" in error_msg.lower():
-                return "❌ Error: API key authentication failed. Please verify:\n\n1. Your Groq API key is correct (starts with 'gsk_')\n2. Your Tavily API key is correct (starts with 'tvly-')\n3. Your keys are entered correctly in the sidebar\n4. Your keys are active and not expired\n\nGet free keys:\n- Groq: https://console.groq.com/\n- Tavily: https://tavily.com/"
+                return "❌ Error: API key authentication failed.\n\n**Please verify:**\n1. Your Groq API key is correct (starts with 'gsk_')\n2. Your Tavily API key is correct (starts with 'tvly-')\n3. Keys are entered correctly in the sidebar\n4. Keys are active and not expired\n\n**Get free keys:**\n- Groq: https://console.groq.com/\n- Tavily: https://tavily.com/"
             elif "rate limit" in error_msg.lower() or "429" in error_msg:
                 return "⚠️ Error: Rate limit exceeded. Please wait a moment and try again."
+            elif "openai" in error_msg.lower() and "api" in error_msg.lower():
+                return "❌ Error: Configuration issue detected. The system is trying to use OpenAI instead of Groq.\n\n**Solution:**\n1. Make sure your Groq API key is entered in the sidebar\n2. The key should start with 'gsk_'\n3. Try refreshing the page and re-entering your keys"
             else:
                 return f"❌ Error: {error_msg}\n\nPlease check your API keys and try again."
         
