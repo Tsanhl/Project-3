@@ -9,6 +9,8 @@ from typing import Dict, Any, List
 from langchain_openai import ChatOpenAI
 from langchain_community.tools.tavily_search import TavilySearchResults
 from crewai import Crew, Task, Agent
+# Removed unused import
+from langchain_core.tools import StructuredTool
 import time
 from datetime import datetime
 from dotenv import load_dotenv
@@ -83,9 +85,39 @@ def initialize_llm(api_key: str, model: str = "llama3-8b-8192"):
     )
 
 def setup_web_search(tavily_api_key: str):
-    """Setup web search tool"""
+    """Setup web search tool compatible with CrewAI"""
     os.environ["TAVILY_API_KEY"] = tavily_api_key
-    return TavilySearchResults(k=10, max_results=10)
+    
+    # Create Tavily search tool
+    tavily_tool = TavilySearchResults(k=10, max_results=10)
+    
+    # Create a wrapper function that CrewAI can use
+    def web_search_func(query: str) -> str:
+        """Search the web for current information using Tavily"""
+        try:
+            results = tavily_tool.invoke({"query": query})
+            if isinstance(results, list):
+                # Format results nicely
+                formatted = []
+                for result in results[:5]:  # Limit to top 5
+                    if isinstance(result, dict):
+                        content = result.get('content', result.get('snippet', ''))
+                        url = result.get('url', '')
+                        if content:
+                            formatted.append(f"Source: {url}\n{content}\n")
+                return "\n".join(formatted) if formatted else str(results)
+            return str(results)
+        except Exception as e:
+            return f"Search error: {str(e)}"
+    
+    # Create a StructuredTool that CrewAI accepts
+    web_search_tool = StructuredTool.from_function(
+        func=web_search_func,
+        name="web_search",
+        description="Search the web for current, accurate information on any topic. Use this to find up-to-date information, news, facts, and data from the internet."
+    )
+    
+    return web_search_tool
 
 def create_research_agent(llm: ChatOpenAI, web_search_tool: Any):
     """Create Research Agent for web search"""
@@ -149,7 +181,9 @@ def get_ai_response(query: str, groq_api_key: str, tavily_api_key: str):
         
         # Create tasks
         research_task = Task(
-            description=f"Search the web thoroughly for information about: {query}. "
+            description=f"Use the web_search tool to search for information about: {query}. "
+                       f"You MUST use the web_search tool to find current information. "
+                       f"Call web_search(query='{query}') to search the web. "
                        f"Gather current, accurate information from multiple sources. "
                        f"Focus on finding the most relevant and up-to-date information.",
             expected_output="Comprehensive research findings with sources from web search",
@@ -168,7 +202,8 @@ def get_ai_response(query: str, groq_api_key: str, tavily_api_key: str):
         
         fact_check_task = Task(
             description=f"Verify the facts in the answer about '{query}'. "
-                       f"Use web search to cross-check any claims, statistics, or facts. "
+                       f"Use the web_search tool to cross-check any claims, statistics, or facts. "
+                       f"Make sure to actually CALL the web_search tool to verify information. "
                        f"Ensure accuracy and provide the final verified answer.",
             expected_output="A fact-checked, accurate answer",
             agent=fact_checker_agent,
