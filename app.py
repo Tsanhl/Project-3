@@ -9,11 +9,13 @@ from typing import Dict, Any
 from langchain_openai import ChatOpenAI
 from crewai_tools import PDFSearchTool
 from langchain_community.tools.tavily_search import TavilySearchResults
-from crewai_tools import tool
 from crewai import Crew, Task, Agent
 import time
 from datetime import datetime
 from dotenv import load_dotenv
+
+# Import tool decorator - use LangChain's tool which is compatible with CrewAI
+from langchain_core.tools import tool
 
 # Load environment variables from .env file if it exists
 load_dotenv()
@@ -108,7 +110,15 @@ def setup_tools(groq_api_key: str, tavily_api_key: str, pdf_path: str = "doc.pdf
 
 @tool
 def router_tool(question: str) -> str:
-    """Router Function to determine search method"""
+    """Router Function to determine search method. 
+    Use this to route questions to either vectorstore (PDF) or web search.
+    
+    Args:
+        question: The user's question to route
+        
+    Returns:
+        'vectorstore' if question is about PDF content, 'web_search' otherwise
+    """
     pdf_keywords = ['Sporo', 'patient', 'chart', 'health', 'medical']
     if any(keyword.lower() in question.lower() for keyword in pdf_keywords):
         return 'vectorstore'
