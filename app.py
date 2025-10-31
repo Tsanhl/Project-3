@@ -54,18 +54,23 @@ if 'tavily_api_key' not in st.session_state:
     st.session_state.tavily_api_key = os.getenv("TAVILY_API_KEY", "")
 
 def initialize_llm(api_key: str, model: str = "llama3-8b-8192"):
-    """Initialize the LLM with Groq - configured for CrewAI"""
-    # Set environment variable for CrewAI compatibility
+    """Initialize the LLM with Groq - properly configured for CrewAI"""
+    # IMPORTANT: CrewAI needs the API key in environment for Groq
+    # Since Groq uses OpenAI-compatible API, we set OPENAI_API_KEY
+    # But we MUST use the custom base URL in the ChatOpenAI instance
     os.environ["OPENAI_API_KEY"] = api_key
     
-    # Create LangChain ChatOpenAI instance for Groq
-    return ChatOpenAI(
+    # Create LangChain ChatOpenAI instance configured for Groq
+    # This ensures it uses Groq's endpoint, not OpenAI's
+    llm = ChatOpenAI(
         openai_api_base="https://api.groq.com/openai/v1",
         openai_api_key=api_key,
         model_name=model,
         temperature=0.7,
         max_tokens=2000,
     )
+    
+    return llm
 
 def setup_web_search(tavily_api_key: str):
     """Setup web search tool using CrewAI's TavilySearchTool"""
@@ -83,9 +88,9 @@ def create_research_agent(llm: ChatOpenAI, web_search_tool: Any):
             "You always verify facts from multiple sources and provide well-sourced answers. "
             "You can answer questions about ANY topic - current events, history, science, technology, culture, and more."
         ),
-        verbose=True,
+        verbose=False,  # Reduced verbosity for cleaner output
         allow_delegation=False,
-        llm=llm,
+        llm=llm,  # Pass the configured LLM directly
         tools=[web_search_tool]
     )
 
@@ -100,7 +105,7 @@ def create_answer_agent(llm: ChatOpenAI):
             "You are friendly, knowledgeable, and always aim to be helpful. "
             "You format your answers in a natural, easy-to-read way with proper paragraphs and structure."
         ),
-        verbose=True,
+        verbose=False,
         allow_delegation=False,
         llm=llm
     )
@@ -115,7 +120,7 @@ def create_fact_checker_agent(llm: ChatOpenAI, web_search_tool: Any):
             "You verify every factual claim against current web sources. "
             "You ensure accuracy and provide corrections if needed."
         ),
-        verbose=True,
+        verbose=False,
         allow_delegation=False,
         llm=llm,
         tools=[web_search_tool]
@@ -124,7 +129,21 @@ def create_fact_checker_agent(llm: ChatOpenAI, web_search_tool: Any):
 def get_ai_response(query: str, groq_api_key: str, tavily_api_key: str, model: str = "llama3-8b-8192"):
     """Get AI response using CrewAI agents"""
     try:
-        # Initialize LLM and set environment for CrewAI
+        # Validate API keys first
+        if not groq_api_key or groq_api_key.strip() == "":
+            return "❌ Error: Groq API key is missing. Please enter your Groq API key in the sidebar."
+        
+        if not tavily_api_key or tavily_api_key.strip() == "":
+            return "❌ Error: Tavily API key is missing. Please enter your Tavily API key in the sidebar."
+        
+        # Validate key format (basic check)
+        if not groq_api_key.startswith('gsk_'):
+            return "❌ Error: Invalid Groq API key format. Groq keys should start with 'gsk_'. Please check your key."
+        
+        if not tavily_api_key.startswith('tvly-'):
+            return "❌ Error: Invalid Tavily API key format. Tavily keys should start with 'tvly-'. Please check your key."
+        
+        # Initialize LLM and tools
         llm = initialize_llm(groq_api_key, model)
         web_search_tool = setup_web_search(tavily_api_key)
         
@@ -133,32 +152,29 @@ def get_ai_response(query: str, groq_api_key: str, tavily_api_key: str, model: s
         answer_agent = create_answer_agent(llm)
         fact_checker_agent = create_fact_checker_agent(llm, web_search_tool)
         
-        # Create tasks
+        # Create tasks with clear instructions
         research_task = Task(
-            description=f"Use your web search tool to find comprehensive information about: {query}. "
-                       f"Search thoroughly and gather current, accurate information from multiple sources. "
-                       f"Focus on finding the most relevant and up-to-date information. "
-                       f"Make sure to actually use the search tool.",
-            expected_output="Comprehensive research findings with sources from web search",
+            description=f"Search the web for comprehensive information about: {query}. "
+                       f"Use your web search tool to find current, accurate information from multiple sources. "
+                       f"Gather detailed information about this topic.",
+            expected_output="Detailed research findings with sources from web search",
             agent=research_agent,
         )
         
         answer_task = Task(
             description=f"Based on the research about '{query}', provide a clear, conversational answer. "
-                       f"Answer the question naturally, like ChatGPT would. "
-                       f"Make it friendly, well-structured, and easy to understand. "
-                       f"Include relevant details and context. "
-                       f"Write in a conversational, helpful tone.",
+                       f"Write naturally and helpfully, like ChatGPT. "
+                       f"Make it well-structured with proper paragraphs. "
+                       f"Be friendly and informative.",
             expected_output="A clear, conversational answer to the user's question",
             agent=answer_agent,
             context=[research_task]
         )
         
         fact_check_task = Task(
-            description=f"Verify the facts in the answer about '{query}'. "
-                       f"Use your web search tool to cross-check any claims, statistics, or facts. "
-                       f"Ensure accuracy and provide the final verified answer. "
-                       f"Make sure all information is accurate and up-to-date.",
+            description=f"Review the answer about '{query}' and verify all facts using web search. "
+                       f"Cross-check any claims or statistics. "
+                       f"Provide the final verified, accurate answer.",
             expected_output="A fact-checked, accurate, and verified answer",
             agent=fact_checker_agent,
             context=[answer_task]
@@ -173,8 +189,17 @@ def get_ai_response(query: str, groq_api_key: str, tavily_api_key: str, model: s
             max_rpm=10
         )
         
-        # Execute
-        result = crew.kickoff(inputs={"query": query})
+        # Execute with timeout handling
+        try:
+            result = crew.kickoff(inputs={"query": query})
+        except Exception as e:
+            error_msg = str(e)
+            if "401" in error_msg or "invalid_api_key" in error_msg.lower() or "authentication" in error_msg.lower():
+                return "❌ Error: API key authentication failed. Please verify:\n\n1. Your Groq API key is correct (starts with 'gsk_')\n2. Your Tavily API key is correct (starts with 'tvly-')\n3. Your keys are entered correctly in the sidebar\n4. Your keys are active and not expired\n\nGet free keys:\n- Groq: https://console.groq.com/\n- Tavily: https://tavily.com/"
+            elif "rate limit" in error_msg.lower() or "429" in error_msg:
+                return "⚠️ Error: Rate limit exceeded. Please wait a moment and try again."
+            else:
+                return f"❌ Error: {error_msg}\n\nPlease check your API keys and try again."
         
         # Extract result
         if hasattr(result, 'raw') and result.raw:
@@ -189,12 +214,23 @@ def get_ai_response(query: str, groq_api_key: str, tavily_api_key: str, model: s
         elif isinstance(result, dict):
             return result.get('output', result.get('result', str(result)))
         else:
-            return str(result)
+            result_str = str(result)
+            if len(result_str.strip()) < 10:
+                return "⚠️ Response generated but was too short. Please try again or rephrase your question."
+            return result_str
             
     except Exception as e:
         import traceback
         error_detail = traceback.format_exc()
-        return f"Error: {str(e)}\n\nDetails:\n{error_detail}"
+        
+        # Provide helpful error messages
+        error_msg = str(e)
+        if "401" in error_msg or "invalid_api_key" in error_msg.lower():
+            return "❌ API Key Error: Please verify your API keys are correct and active.\n\n- Groq key should start with 'gsk_'\n- Tavily key should start with 'tvly-'\n\nGet free keys at:\n- https://console.groq.com/\n- https://tavily.com/"
+        elif "connection" in error_msg.lower() or "timeout" in error_msg.lower():
+            return "⚠️ Connection Error: Please check your internet connection and try again."
+        else:
+            return f"❌ Error: {error_msg}\n\nPlease try again or check the sidebar for API key setup instructions."
 
 def main():
     # Header
@@ -217,16 +253,19 @@ def main():
             #### 🚀 Groq API Key (FREE)
             1. Visit **[Groq Console](https://console.groq.com/)**
             2. Sign up (free, no credit card)
-            3. Create API key
-            4. Copy and paste below
+            3. Go to **API Keys** section
+            4. Click **"Create API Key"**
+            5. Copy key (starts with `gsk_`)
+            6. Paste below
             
             **Free:** 14,400 requests/day
             
             #### 🌐 Tavily API Key (FREE)
             1. Visit **[Tavily AI](https://tavily.com/)**
             2. Sign up (free)
-            3. Generate API key
-            4. Copy and paste below
+            3. Go to Dashboard → **API Keys**
+            4. Generate API key (starts with `tvly-`)
+            5. Paste below
             
             **Free:** 1,000 searches/month
             """)
@@ -242,18 +281,26 @@ def main():
             type="password",
             value=st.session_state.groq_api_key,
             placeholder="gsk_...",
-            help="Enter your Groq API key"
+            help="Enter your Groq API key (should start with 'gsk_')"
         )
         st.session_state.groq_api_key = groq_api_key
+        
+        # Show validation status
+        if groq_api_key and not groq_api_key.startswith('gsk_'):
+            st.warning("⚠️ Groq keys should start with 'gsk_'")
         
         tavily_api_key = st.text_input(
             "🌐 Tavily API Key",
             type="password",
             value=st.session_state.tavily_api_key,
             placeholder="tvly-...",
-            help="Enter your Tavily API key"
+            help="Enter your Tavily API key (should start with 'tvly-')"
         )
         st.session_state.tavily_api_key = tavily_api_key
+        
+        # Show validation status
+        if tavily_api_key and not tavily_api_key.startswith('tvly-'):
+            st.warning("⚠️ Tavily keys should start with 'tvly-'")
         
         st.divider()
         
@@ -262,8 +309,19 @@ def main():
             "🤖 Model",
             ["llama3-8b-8192", "llama3-70b-8192", "mixtral-8x7b-32768"],
             index=0,
-            help="Select the AI model"
+            help="Select the AI model (llama3-8b-8192 is fastest)"
         )
+        
+        st.divider()
+        
+        # Quick test button
+        if st.button("🧪 Test API Keys", use_container_width=True):
+            if not groq_api_key or not groq_api_key.startswith('gsk_'):
+                st.error("❌ Invalid Groq API key format")
+            elif not tavily_api_key or not tavily_api_key.startswith('tvly-'):
+                st.error("❌ Invalid Tavily API key format")
+            else:
+                st.success("✅ API key formats look correct! Try asking a question.")
         
         st.divider()
         
@@ -289,6 +347,15 @@ def main():
         if not groq_api_key or not tavily_api_key or groq_api_key.strip() == "" or tavily_api_key.strip() == "":
             st.error("❌ Please enter both API keys in the sidebar!")
             st.info("💡 Don't have API keys? Expand 'How to Get FREE API Keys' in the sidebar!")
+            st.stop()
+        
+        # Validate key formats
+        if not groq_api_key.startswith('gsk_'):
+            st.error("❌ Invalid Groq API key! Keys should start with 'gsk_'\n\nGet your key at: https://console.groq.com/")
+            st.stop()
+        
+        if not tavily_api_key.startswith('tvly-'):
+            st.error("❌ Invalid Tavily API key! Keys should start with 'tvly-'\n\nGet your key at: https://tavily.com/")
             st.stop()
         
         # Add user message
