@@ -789,6 +789,44 @@ def main():
         
         st.divider()
         
+        # Document Upload Section
+        st.markdown("### 📄 Document Upload")
+        st.markdown("Upload documents (PDF, DOCX, TXT) to enhance answers with document knowledge")
+        
+        uploaded_files = st.file_uploader(
+            "Upload Documents",
+            type=['pdf', 'docx', 'doc', 'txt'],
+            accept_multiple_files=True,
+            help="Upload documents that will be used as knowledge base for answering questions"
+        )
+        
+        # Process uploaded files
+        if uploaded_files:
+            for uploaded_file in uploaded_files:
+                # Check if already processed
+                existing_names = [doc['name'] for doc in st.session_state.uploaded_documents]
+                if uploaded_file.name not in existing_names:
+                    with st.spinner(f"📄 Processing {uploaded_file.name}..."):
+                        content = extract_text_from_file(uploaded_file)
+                        st.session_state.uploaded_documents.append({
+                            'name': uploaded_file.name,
+                            'content': content
+                        })
+        
+        # Display uploaded documents
+        if st.session_state.uploaded_documents:
+            st.markdown("**Uploaded Documents:**")
+            for i, doc in enumerate(st.session_state.uploaded_documents, 1):
+                col1, col2 = st.columns([4, 1])
+                with col1:
+                    st.text(f"{i}. {doc['name']} ({len(doc['content'])} chars)")
+                with col2:
+                    if st.button("🗑️", key=f"delete_{i}"):
+                        st.session_state.uploaded_documents.pop(i-1)
+                        st.rerun()
+        
+        st.divider()
+        
         # Info
         st.info("💡 **Tip:** Law questions are automatically detected and answered using IRAC methodology with OSCOLA citations!")
     
