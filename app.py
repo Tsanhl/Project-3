@@ -8,20 +8,13 @@ import os
 from typing import Dict, Any, List
 from langchain_openai import ChatOpenAI
 from crewai import Crew, Task, Agent
+from crewai_tools import TavilySearchTool
 import time
 from datetime import datetime
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
-
-# Try to use crewai_tools TavilySearchTool, fallback to direct implementation
-try:
-    from crewai_tools import TavilySearchTool
-    USE_CREWAI_TOOL = True
-except ImportError:
-    USE_CREWAI_TOOL = False
-    from langchain_community.tools.tavily_search import TavilySearchResults
 
 # Page configuration
 st.set_page_config(
@@ -43,25 +36,6 @@ st.markdown("""
         text-align: center;
         margin-bottom: 1rem;
     }
-    .chat-message {
-        padding: 1rem;
-        border-radius: 10px;
-        margin-bottom: 1rem;
-        display: flex;
-        align-items: flex-start;
-    }
-    .user-message {
-        background: #f0f0f0;
-        margin-left: 20%;
-    }
-    .assistant-message {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        margin-right: 20%;
-    }
-    .message-content {
-        flex: 1;
-    }
     .stTextInput > div > div > input {
         font-size: 1.1rem;
         padding: 0.75rem;
@@ -80,7 +54,11 @@ if 'tavily_api_key' not in st.session_state:
     st.session_state.tavily_api_key = os.getenv("TAVILY_API_KEY", "")
 
 def initialize_llm(api_key: str, model: str = "llama3-8b-8192"):
-    """Initialize the LLM with Groq"""
+    """Initialize the LLM with Groq - configured for CrewAI"""
+    # Set environment variable for CrewAI compatibility
+    os.environ["OPENAI_API_KEY"] = api_key
+    
+    # Create LangChain ChatOpenAI instance for Groq
     return ChatOpenAI(
         openai_api_base="https://api.groq.com/openai/v1",
         openai_api_key=api_key,
@@ -90,40 +68,9 @@ def initialize_llm(api_key: str, model: str = "llama3-8b-8192"):
     )
 
 def setup_web_search(tavily_api_key: str):
-    """Setup web search tool compatible with CrewAI"""
+    """Setup web search tool using CrewAI's TavilySearchTool"""
     os.environ["TAVILY_API_KEY"] = tavily_api_key
-    
-    if USE_CREWAI_TOOL:
-        # Use CrewAI's native TavilySearchTool
-        return TavilySearchTool()
-    else:
-        # Fallback: Use LangChain tool and wrap it
-        from langchain_core.tools import StructuredTool
-        
-        tavily_tool = TavilySearchResults(k=10, max_results=10)
-        
-        def web_search_func(query: str) -> str:
-            """Search the web for current information using Tavily"""
-            try:
-                results = tavily_tool.invoke({"query": query})
-                if isinstance(results, list):
-                    formatted = []
-                    for result in results[:5]:
-                        if isinstance(result, dict):
-                            content = result.get('content', result.get('snippet', ''))
-                            url = result.get('url', '')
-                            if content:
-                                formatted.append(f"Source: {url}\n{content}\n")
-                    return "\n".join(formatted) if formatted else str(results)
-                return str(results)
-            except Exception as e:
-                return f"Search error: {str(e)}"
-        
-        return StructuredTool.from_function(
-            func=web_search_func,
-            name="web_search",
-            description="Search the web for current, accurate information on any topic."
-        )
+    return TavilySearchTool()
 
 def create_research_agent(llm: ChatOpenAI, web_search_tool: Any):
     """Create Research Agent for web search"""
@@ -174,10 +121,11 @@ def create_fact_checker_agent(llm: ChatOpenAI, web_search_tool: Any):
         tools=[web_search_tool]
     )
 
-def get_ai_response(query: str, groq_api_key: str, tavily_api_key: str):
+def get_ai_response(query: str, groq_api_key: str, tavily_api_key: str, model: str = "llama3-8b-8192"):
     """Get AI response using CrewAI agents"""
     try:
-        llm = initialize_llm(groq_api_key)
+        # Initialize LLM and set environment for CrewAI
+        llm = initialize_llm(groq_api_key, model)
         web_search_tool = setup_web_search(tavily_api_key)
         
         # Create agents
@@ -187,9 +135,10 @@ def get_ai_response(query: str, groq_api_key: str, tavily_api_key: str):
         
         # Create tasks
         research_task = Task(
-            description=f"Use your web search tool to find information about: {query}. "
+            description=f"Use your web search tool to find comprehensive information about: {query}. "
                        f"Search thoroughly and gather current, accurate information from multiple sources. "
-                       f"Focus on finding the most relevant and up-to-date information.",
+                       f"Focus on finding the most relevant and up-to-date information. "
+                       f"Make sure to actually use the search tool.",
             expected_output="Comprehensive research findings with sources from web search",
             agent=research_agent,
         )
@@ -198,7 +147,8 @@ def get_ai_response(query: str, groq_api_key: str, tavily_api_key: str):
             description=f"Based on the research about '{query}', provide a clear, conversational answer. "
                        f"Answer the question naturally, like ChatGPT would. "
                        f"Make it friendly, well-structured, and easy to understand. "
-                       f"Include relevant details and context.",
+                       f"Include relevant details and context. "
+                       f"Write in a conversational, helpful tone.",
             expected_output="A clear, conversational answer to the user's question",
             agent=answer_agent,
             context=[research_task]
@@ -207,8 +157,9 @@ def get_ai_response(query: str, groq_api_key: str, tavily_api_key: str):
         fact_check_task = Task(
             description=f"Verify the facts in the answer about '{query}'. "
                        f"Use your web search tool to cross-check any claims, statistics, or facts. "
-                       f"Ensure accuracy and provide the final verified answer.",
-            expected_output="A fact-checked, accurate answer",
+                       f"Ensure accuracy and provide the final verified answer. "
+                       f"Make sure all information is accurate and up-to-date.",
+            expected_output="A fact-checked, accurate, and verified answer",
             agent=fact_checker_agent,
             context=[answer_task]
         )
@@ -235,6 +186,8 @@ def get_ai_response(query: str, groq_api_key: str, tavily_api_key: str):
                 return str(result.tasks_output[-1])
             else:
                 return str(result.tasks_output)
+        elif isinstance(result, dict):
+            return result.get('output', result.get('result', str(result)))
         else:
             return str(result)
             
@@ -346,7 +299,7 @@ def main():
         # Generate response
         with st.chat_message("assistant"):
             with st.spinner("🔍 Searching the web and thinking..."):
-                response = get_ai_response(prompt, groq_api_key, tavily_api_key)
+                response = get_ai_response(prompt, groq_api_key, tavily_api_key, model)
             
             # Display response
             message_placeholder = st.empty()
