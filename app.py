@@ -82,7 +82,7 @@ def search_web(query: str, tavily_client: TavilyClient, max_results: int = 5) ->
     except Exception as e:
         return f"Error searching web: {str(e)}"
 
-def get_ai_response(query: str, groq_api_key: str, tavily_api_key: str, model: str = "llama3-8b-8192"):
+def get_ai_response(query: str, groq_api_key: str, tavily_api_key: str, model: str = "llama-3.1-8b-instant"):
     """Get AI response using Groq and Tavily directly"""
     try:
         # Validate API keys first
@@ -128,16 +128,29 @@ Make your answer conversational and well-structured."""
         with st.spinner("🤖 Generating answer..."):
             try:
                 # Use Groq's chat completion API
-                completion = groq_client.chat.completions.create(
-                    model=model,
-                    messages=[
+                # Handle different model parameter requirements
+                create_params = {
+                    "model": model,
+                    "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
-                    temperature=0.7,
-                    max_tokens=2000,
-                    top_p=1,
-                )
+                    "temperature": 0.7,
+                    "max_tokens": 2000,
+                    "top_p": 1,
+                }
+                
+                # Some models may need different parameters, try with default first
+                try:
+                    completion = groq_client.chat.completions.create(**create_params)
+                except Exception as model_error:
+                    # If model doesn't exist, try with llama-3.1-8b-instant as fallback
+                    if "not found" in str(model_error).lower() or "decommissioned" in str(model_error).lower():
+                        st.warning(f"⚠️ Model {model} not available, using llama-3.1-8b-instant instead")
+                        create_params["model"] = "llama-3.1-8b-instant"
+                        completion = groq_client.chat.completions.create(**create_params)
+                    else:
+                        raise model_error
                 
                 # Extract response
                 response = completion.choices[0].message.content
