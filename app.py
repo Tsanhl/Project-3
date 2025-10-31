@@ -55,23 +55,18 @@ if 'tavily_api_key' not in st.session_state:
 
 def initialize_llm(api_key: str, model: str = "llama3-8b-8192"):
     """Initialize the LLM with Groq - properly configured for CrewAI"""
-    # IMPORTANT: Use the correct parameter names for langchain_openai.ChatOpenAI
-    # We use openai_api_base and openai_api_key to point to Groq
+    # IMPORTANT: Do NOT set OPENAI_API_KEY - CrewAI will use it to create OpenAI client
+    # Instead, create ChatOpenAI instance with Groq's endpoint directly
     
     # Create LangChain ChatOpenAI instance configured for Groq
     # This MUST use Groq's endpoint, not OpenAI's default
     llm = ChatOpenAI(
         openai_api_base="https://api.groq.com/openai/v1",  # Groq's OpenAI-compatible endpoint
-        openai_api_key=api_key,  # Groq API key
+        openai_api_key=api_key,  # Groq API key (stored in LLM instance, not env)
         model_name=model,  # Model name
         temperature=0.7,
         max_tokens=2000,
     )
-    
-    # IMPORTANT: Remove OPENAI_API_KEY from env to prevent CrewAI from using OpenAI
-    # CrewAI might check this and create its own client
-    if "OPENAI_API_KEY" in os.environ:
-        del os.environ["OPENAI_API_KEY"]
     
     return llm
 
@@ -194,11 +189,16 @@ def get_ai_response(query: str, groq_api_key: str, tavily_api_key: str, model: s
         
         # Execute with timeout handling
         try:
-            # Make sure OPENAI_API_KEY is not set (it causes CrewAI to use OpenAI instead of our Groq LLM)
-            if "OPENAI_API_KEY" in os.environ:
-                del os.environ["OPENAI_API_KEY"]
+            # CRITICAL: Remove OPENAI_API_KEY from environment before execution
+            # This prevents CrewAI from creating its own OpenAI client instead of using our Groq LLM
+            original_openai_key = os.environ.pop("OPENAI_API_KEY", None)
             
+            # Execute crew
             result = crew.kickoff(inputs={"query": query})
+            
+            # Restore original key if it existed (for other parts of the system)
+            if original_openai_key:
+                os.environ["OPENAI_API_KEY"] = original_openai_key
         except Exception as e:
             error_msg = str(e)
             if "401" in error_msg or "invalid_api_key" in error_msg.lower() or "authentication" in error_msg.lower():
