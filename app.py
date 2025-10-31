@@ -254,12 +254,18 @@ def main():
         
         st.divider()
         
-        # Model selection
+        # Model selection - using currently available Groq models
         model = st.selectbox(
             "🤖 Model",
-            ["llama3-8b-8192", "llama3-70b-8192", "mixtral-8x7b-32768", "openai/gpt-oss-20b"],
+            [
+                "llama-3.1-8b-instant",  # Fast, efficient (DEFAULT)
+                "llama-3.1-70b-versatile",  # More capable
+                "llama-3.3-70b-versatile",  # Latest version
+                "mixtral-8x7b-32768",  # Alternative option
+                "gemma2-9b-it"  # Google model
+            ],
             index=0,
-            help="Select the AI model (llama3-8b-8192 is fastest)"
+            help="Select the AI model (llama-3.1-8b-instant is fastest and recommended)"
         )
         
         st.divider()
