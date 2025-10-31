@@ -114,6 +114,44 @@ def search_web(query: str, tavily_client: TavilyClient, max_results: int = 5, se
     except Exception as e:
         return (f"Error searching web: {str(e)}", [])
 
+def comprehensive_search(query: str, tavily_client: TavilyClient, search_type: str = "general") -> List[Dict]:
+    """Perform comprehensive multi-query search for maximum accuracy"""
+    all_sources = []
+    seen_urls = set()  # Avoid duplicates
+    
+    # For law questions, do multiple specialized searches
+    if search_type == "law":
+        search_queries = [
+            query,  # Original query
+            f"{query} case law UK",  # UK case law
+            f"{query} statute legislation",  # Statutes
+            f"{query} legal precedent",  # Precedents
+            f"{query} academic legal journal",  # Academic sources
+            f"{query} court decision",  # Court decisions
+            f"{query} legal principle"  # Legal principles
+        ]
+    else:
+        # For general questions, use variations
+        search_queries = [
+            query,  # Original query
+            f"{query} facts",  # Factual information
+            f"{query} latest",  # Latest information
+            f"{query} accurate"  # Verified information
+        ]
+    
+    # Perform multiple searches
+    for search_query in search_queries[:5]:  # Limit to 5 searches to avoid rate limits
+        try:
+            _, sources = search_web(search_query, tavily_client, max_results=5, search_type=search_type)
+            for source in sources:
+                if source['url'] not in seen_urls:
+                    all_sources.append(source)
+                    seen_urls.add(source['url'])
+        except Exception as e:
+            continue  # Continue with other searches if one fails
+    
+    return all_sources[:20]  # Return up to 20 unique sources
+
 def format_oscola_citation(case_name: str, year: str = "", volume: str = "", reporter: str = "", page: str = "") -> str:
     """Format a case citation in OSCOLA style"""
     # Basic OSCOLA format: Case Name [Year] Volume Reporter Page
@@ -125,73 +163,98 @@ def format_oscola_citation(case_name: str, year: str = "", volume: str = "", rep
     else:
         return case_name
 
-def get_law_answer(query: str, groq_client: Groq, tavily_client: TavilyClient, model: str, sources: List[Dict]) -> str:
-    """Generate a law answer following IRAC structure with OSCOLA citations"""
+def get_law_answer(query: str, groq_client: Groq, tavily_client: TavilyClient, model: str, initial_sources: List[Dict]) -> str:
+    """Generate a law answer following IRAC structure with OSCOLA citations and comprehensive fact-checking"""
     
-    # Search for additional legal sources
-    law_searches = [
-        f"{query} case law precedent",
-        f"{query} statute legislation",
-        f"{query} academic legal journal"
-    ]
+    # Perform comprehensive multi-source search
+    with st.spinner("🔍 Performing comprehensive legal database search..."):
+        all_sources = comprehensive_search(query, tavily_client, search_type="law")
+        # Merge with initial sources
+        seen_urls = {s['url'] for s in all_sources}
+        for source in initial_sources:
+            if source['url'] not in seen_urls:
+                all_sources.append(source)
+                seen_urls.add(source['url'])
     
-    all_sources = sources.copy()
-    for search_query in law_searches[:2]:  # Limit to avoid too many API calls
-        _, additional_sources = search_web(search_query, tavily_client, max_results=2, search_type="law")
-        all_sources.extend(additional_sources)
+    # Remove duplicates and limit to most relevant sources
+    all_sources = all_sources[:15]
     
-    # Format sources for prompt
+    # Format sources with full content for better context
     sources_text = "\n\n".join([
-        f"Source {i+1}: {s['title']}\nURL: {s['url']}\nContent: {s['content'][:300]}..."
-        for i, s in enumerate(all_sources[:10])
+        f"=== Source {i+1}: {s['title']} ===\nURL: {s['url']}\nContent: {s['content'][:600]}\n"
+        for i, s in enumerate(all_sources)
     ])
     
-    # Create comprehensive law-specific prompt
-    system_prompt = """You are a legal expert AI assistant specializing in formal legal analysis. 
-You MUST follow the IRAC (Issue, Rule, Analysis, Conclusion) methodology for all legal problem questions.
-You MUST use OSCOLA citation format for all cases, statutes, and legal sources.
-You MUST be factual, accurate, and cross-reference all legal principles with the provided sources.
-All citations must be in OSCOLA format: Case Name [Year] Volume Reporter Page, or Statute Name section number.
-Use formal, objective legal language. Avoid colloquialisms."""
+    # Create comprehensive law-specific prompt with strict accuracy requirements
+    system_prompt = """You are a legal expert AI assistant specializing in formal legal analysis with STRICT ACCURACY requirements.
+CRITICAL RULES:
+1. You MUST ONLY state facts, cases, statutes, or legal principles that are EXPLICITLY found in the provided sources
+2. You MUST cross-reference information across multiple sources before stating it as fact
+3. If multiple sources conflict, you MUST state this conflict explicitly
+4. If information is not found in sources, you MUST state "The sources do not provide sufficient information on this point"
+5. You MUST follow IRAC (Issue, Rule, Analysis, Conclusion) methodology
+6. You MUST use OSCOLA citation format for ALL cases and statutes
+7. ALL citations must be VERIFIED from the sources - NO FABRICATED CITATIONS
+8. Use formal, objective legal language
+9. If unsure about any fact, state the uncertainty clearly"""
 
-    user_prompt = f"""You are answering a legal problem question. You MUST follow IRAC structure and OSCOLA citation format.
+    user_prompt = f"""CRITICAL: Answer this legal question using ONLY information found in the sources below. DO NOT make up facts, cases, or citations.
 
 Legal Question: {query}
 
-Research Sources Found:
+=== RESEARCH SOURCES (Cross-reference these carefully) ===
 {sources_text}
 
-INSTRUCTIONS:
-1. **ISSUE**: Identify the core legal issue(s) and sub-issues. State parties clearly.
+=== STRICT INSTRUCTIONS ===
 
-2. **RULE**: 
-   - State the relevant legal principles, rules, and tests
-   - For statutes: Cite exact sections (e.g., "s.1(1) of the Occupiers' Liability Act 1957")
-   - For cases: Use OSCOLA format with full citation (e.g., "Entores v Miles Far East Corp [1955] 2 QB 327")
-   - All cases MUST be real and fact-checked from the sources provided
-   - Include academic sources where relevant (cite properly)
+**ACCURACY REQUIREMENTS:**
+- BEFORE stating any fact, case name, statute, or legal principle, VERIFY it appears in the sources above
+- If a case name is not in the sources, DO NOT cite it
+- If a statute section is not mentioned in the sources, DO NOT cite it
+- Cross-check information across multiple sources for consistency
+- If sources contradict each other, acknowledge the contradiction
 
-3. **ANALYSIS**:
-   - Link specific facts from the question to specific legal rules
-   - Apply rules to facts word-by-word
-   - Argue both sides (claimant/defendant perspectives)
-   - State what a court would "likely hold" with justification
-   - Every assertion MUST have a citation in OSCOLA format
+**IRAC STRUCTURE:**
 
-4. **CONCLUSION**:
-   - Direct answer to the issue(s)
-   - Summarize without introducing new arguments
-   - Advise on likely legal position and strength of case
+## Issue
+- Identify core legal issue(s) and sub-issues
+- State parties clearly
+- ONLY identify issues that can be addressed with information from sources
 
-FORMAT REQUIREMENTS:
-- Use OSCOLA citations in parentheses after relevant points: (Case Name [Year] Volume Reporter Page)
+## Rule
+- State legal principles found in the sources
+- For statutes: Cite exact sections ONLY if found in sources (format: "s.X of the [Act Name]")
+- For cases: Use OSCOLA format ONLY if the case is mentioned in sources
+  - Format: "Case Name [Year] Volume Reporter Page" (e.g., "Entores v Miles Far East Corp [1955] 2 QB 327")
+- If a case is mentioned without full citation, use what is provided
+- Include academic sources where found in sources
+- If a legal principle is not in sources, state: "The sources do not provide the legal rule on this point"
+
+## Analysis
+- Link facts from the question to legal rules found in sources
+- Apply rules from sources to facts
+- Argue both sides using principles from sources
+- State what a court would likely hold based on sources
+- Every assertion MUST reference a source
+- If analysis requires information not in sources, state this limitation
+
+## Conclusion
+- Direct answer to the issue(s) based on sources
+- Summarize without introducing new arguments
+- Advise on likely legal position based on available sources
+- If conclusion is limited by missing information, state this
+
+**CITATION FORMAT:**
+- Use OSCOLA citations in parentheses: (Case Name [Year] Volume Reporter Page)
 - For statutes: (Act Name, s.X)
-- Use headings: ## Issue, ## Rule, ## Analysis, ## Conclusion
-- Be formal and objective
-- Cite sources from the research provided
-- If sources don't contain enough information, say so honestly
+- Reference source by number when appropriate: (Source 1), (Source 3)
 
-Generate your answer now following IRAC structure with proper OSCOLA citations:"""
+**IF INFORMATION IS MISSING:**
+- If sources don't contain sufficient information on a legal point, explicitly state: "The available sources do not provide sufficient information to address [specific point]"
+- DO NOT speculate or use general knowledge beyond what is in sources
+- Be transparent about limitations
+
+Generate your answer now, ensuring EVERY claim is verified against the sources:"""
 
     try:
         completion = groq_client.chat.completions.create(
@@ -200,9 +263,9 @@ Generate your answer now following IRAC structure with proper OSCOLA citations:"
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.3,  # Lower temperature for more precise legal analysis
+            temperature=0.2,  # Very low temperature for maximum accuracy and precision
             max_tokens=4000,  # Longer responses for comprehensive legal analysis
-            top_p=0.9,
+            top_p=0.8,  # Lower top_p for more focused, accurate responses
         )
         
         response = completion.choices[0].message.content
@@ -223,33 +286,68 @@ Generate your answer now following IRAC structure with proper OSCOLA citations:"
         else:
             return f"❌ Error generating legal answer: {error_msg}"
 
-def get_general_answer(query: str, groq_client: Groq, tavily_client: TavilyClient, model: str, sources: List[Dict]) -> str:
-    """Generate a general answer with source links"""
+def get_general_answer(query: str, groq_client: Groq, tavily_client: TavilyClient, model: str, initial_sources: List[Dict]) -> str:
+    """Generate a general answer with comprehensive fact-checking and source links"""
+    
+    # Perform comprehensive multi-source search
+    with st.spinner("🔍 Gathering comprehensive information..."):
+        all_sources = comprehensive_search(query, tavily_client, search_type="general")
+        # Merge with initial sources
+        seen_urls = {s['url'] for s in all_sources}
+        for source in initial_sources:
+            if source['url'] not in seen_urls:
+                all_sources.append(source)
+                seen_urls.add(source['url'])
+    
+    # Remove duplicates and limit to most relevant sources
+    all_sources = all_sources[:12]
     
     sources_text = "\n\n".join([
-        f"Source {i+1}: {s['title']}\nURL: {s['url']}\nContent: {s['content'][:500]}..."
-        for i, s in enumerate(sources)
+        f"=== Source {i+1}: {s['title']} ===\nURL: {s['url']}\nContent: {s['content'][:600]}\n"
+        for i, s in enumerate(all_sources)
     ])
     
-    system_prompt = """You are a helpful AI assistant that answers questions using web search results.
-You provide accurate, up-to-date information based on the search results provided.
-Be conversational, clear, and cite sources when relevant.
-Always include source links for verifiable information.
-If the search results don't contain enough information, say so honestly."""
+    system_prompt = """You are a helpful AI assistant that provides ACCURATE, FACT-CHECKED answers using web search results.
+CRITICAL RULES:
+1. You MUST ONLY state facts that are EXPLICITLY found in the provided sources
+2. You MUST cross-reference information across multiple sources for accuracy
+3. If sources conflict, acknowledge the conflict
+4. If information is not in sources, explicitly state this
+5. Be conversational but accurate
+6. Always cite which source supports each claim
+7. If unsure, state your uncertainty clearly"""
 
-    user_prompt = f"""Question: {query}
+    user_prompt = f"""CRITICAL: Answer this question using ONLY information found in the sources below. Cross-reference sources for accuracy.
 
-Web Search Results:
+Question: {query}
+
+=== RESEARCH SOURCES (Cross-reference these for accuracy) ===
 {sources_text}
 
-Please provide a clear, accurate answer to the question based on the web search results above.
-- Use the search results to inform your answer
-- Be factual and up-to-date
-- Cite sources naturally in your response
-- Include relevant source links where appropriate
-- If the search results don't contain enough information, say so honestly
+=== INSTRUCTIONS ===
+1. **ACCURACY FIRST**: 
+   - ONLY state facts that appear in the sources above
+   - Cross-check information across multiple sources
+   - If sources disagree, state the different perspectives
+   - If information is missing, say "The available sources do not provide information on this point"
 
-Make your answer conversational, well-structured, and include source references:"""
+2. **STRUCTURE**:
+   - Provide a clear, well-structured answer
+   - Cite sources naturally (e.g., "According to Source 1..." or "[Source Title](URL)")
+   - Include specific facts, numbers, dates from sources when available
+   - Be conversational but precise
+
+3. **TRANSPARENCY**:
+   - If you cannot answer fully based on sources, state this clearly
+   - If sources conflict, acknowledge the conflict
+   - Don't speculate beyond what sources provide
+
+4. **SOURCE REFERENCES**:
+   - Reference sources by number or title
+   - Include clickable links where relevant
+   - At the end, list all sources used
+
+Generate your answer now, ensuring EVERY claim is verified against the sources:"""
 
     try:
         completion = groq_client.chat.completions.create(
@@ -258,17 +356,17 @@ Make your answer conversational, well-structured, and include source references:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.7,
-            max_tokens=2000,
-            top_p=1,
+            temperature=0.5,  # Lower temperature for more accurate general answers
+            max_tokens=2500,  # Longer responses for comprehensive answers
+            top_p=0.9,  # Slightly lower for more focused responses
         )
         
         response = completion.choices[0].message.content
         
         # Add source links section at the end
-        if sources:
+        if all_sources:
             response += "\n\n---\n\n**📚 Sources:**\n\n"
-            for i, source in enumerate(sources, 1):
+            for i, source in enumerate(all_sources, 1):
                 response += f"{i}. [{source['title']}]({source['url']})\n"
         
         return response
@@ -309,18 +407,18 @@ def get_ai_response(query: str, groq_api_key: str, tavily_api_key: str, model: s
         is_law = is_law_question(query)
         search_type = "law" if is_law else "general"
         
-        # Step 1: Search the web for current information
+        # Step 1: Initial search for current information
         search_status = "🔍 Searching legal databases and scholarly sources..." if is_law else "🔍 Searching the web..."
         with st.spinner(search_status):
-            web_results, sources = search_web(query, tavily_client, max_results=8 if is_law else 5, search_type=search_type)
+            web_results, initial_sources = search_web(query, tavily_client, max_results=8 if is_law else 5, search_type=search_type)
         
-        # Step 2: Generate appropriate response
+        # Step 2: Generate appropriate response with comprehensive fact-checking
         if is_law:
-            with st.spinner("⚖️ Analyzing legal principles and generating IRAC-structured answer with OSCOLA citations..."):
-                response = get_law_answer(query, groq_client, tavily_client, model, sources)
+            with st.spinner("⚖️ Cross-referencing legal sources and generating verified IRAC-structured answer..."):
+                response = get_law_answer(query, groq_client, tavily_client, model, initial_sources)
         else:
-            with st.spinner("🤖 Generating answer..."):
-                response = get_general_answer(query, groq_client, tavily_client, model, sources)
+            with st.spinner("🤖 Cross-checking facts and generating verified answer..."):
+                response = get_general_answer(query, groq_client, tavily_client, model, initial_sources)
         
         if not response or len(response.strip()) < 10:
             return "⚠️ Response generated but was too short. Please try again or rephrase your question."
