@@ -7,16 +7,21 @@ import streamlit as st
 import os
 from typing import Dict, Any, List
 from langchain_openai import ChatOpenAI
-from langchain_community.tools.tavily_search import TavilySearchResults
 from crewai import Crew, Task, Agent
-# Removed unused import
-from langchain_core.tools import StructuredTool
 import time
 from datetime import datetime
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
+
+# Try to use crewai_tools TavilySearchTool, fallback to direct implementation
+try:
+    from crewai_tools import TavilySearchTool
+    USE_CREWAI_TOOL = True
+except ImportError:
+    USE_CREWAI_TOOL = False
+    from langchain_community.tools.tavily_search import TavilySearchResults
 
 # Page configuration
 st.set_page_config(
@@ -88,36 +93,37 @@ def setup_web_search(tavily_api_key: str):
     """Setup web search tool compatible with CrewAI"""
     os.environ["TAVILY_API_KEY"] = tavily_api_key
     
-    # Create Tavily search tool
-    tavily_tool = TavilySearchResults(k=10, max_results=10)
-    
-    # Create a wrapper function that CrewAI can use
-    def web_search_func(query: str) -> str:
-        """Search the web for current information using Tavily"""
-        try:
-            results = tavily_tool.invoke({"query": query})
-            if isinstance(results, list):
-                # Format results nicely
-                formatted = []
-                for result in results[:5]:  # Limit to top 5
-                    if isinstance(result, dict):
-                        content = result.get('content', result.get('snippet', ''))
-                        url = result.get('url', '')
-                        if content:
-                            formatted.append(f"Source: {url}\n{content}\n")
-                return "\n".join(formatted) if formatted else str(results)
-            return str(results)
-        except Exception as e:
-            return f"Search error: {str(e)}"
-    
-    # Create a StructuredTool that CrewAI accepts
-    web_search_tool = StructuredTool.from_function(
-        func=web_search_func,
-        name="web_search",
-        description="Search the web for current, accurate information on any topic. Use this to find up-to-date information, news, facts, and data from the internet."
-    )
-    
-    return web_search_tool
+    if USE_CREWAI_TOOL:
+        # Use CrewAI's native TavilySearchTool
+        return TavilySearchTool()
+    else:
+        # Fallback: Use LangChain tool and wrap it
+        from langchain_core.tools import StructuredTool
+        
+        tavily_tool = TavilySearchResults(k=10, max_results=10)
+        
+        def web_search_func(query: str) -> str:
+            """Search the web for current information using Tavily"""
+            try:
+                results = tavily_tool.invoke({"query": query})
+                if isinstance(results, list):
+                    formatted = []
+                    for result in results[:5]:
+                        if isinstance(result, dict):
+                            content = result.get('content', result.get('snippet', ''))
+                            url = result.get('url', '')
+                            if content:
+                                formatted.append(f"Source: {url}\n{content}\n")
+                    return "\n".join(formatted) if formatted else str(results)
+                return str(results)
+            except Exception as e:
+                return f"Search error: {str(e)}"
+        
+        return StructuredTool.from_function(
+            func=web_search_func,
+            name="web_search",
+            description="Search the web for current, accurate information on any topic."
+        )
 
 def create_research_agent(llm: ChatOpenAI, web_search_tool: Any):
     """Create Research Agent for web search"""
@@ -181,10 +187,8 @@ def get_ai_response(query: str, groq_api_key: str, tavily_api_key: str):
         
         # Create tasks
         research_task = Task(
-            description=f"Use the web_search tool to search for information about: {query}. "
-                       f"You MUST use the web_search tool to find current information. "
-                       f"Call web_search(query='{query}') to search the web. "
-                       f"Gather current, accurate information from multiple sources. "
+            description=f"Use your web search tool to find information about: {query}. "
+                       f"Search thoroughly and gather current, accurate information from multiple sources. "
                        f"Focus on finding the most relevant and up-to-date information.",
             expected_output="Comprehensive research findings with sources from web search",
             agent=research_agent,
@@ -202,8 +206,7 @@ def get_ai_response(query: str, groq_api_key: str, tavily_api_key: str):
         
         fact_check_task = Task(
             description=f"Verify the facts in the answer about '{query}'. "
-                       f"Use the web_search tool to cross-check any claims, statistics, or facts. "
-                       f"Make sure to actually CALL the web_search tool to verify information. "
+                       f"Use your web search tool to cross-check any claims, statistics, or facts. "
                        f"Ensure accuracy and provide the final verified answer.",
             expected_output="A fact-checked, accurate answer",
             agent=fact_checker_agent,
@@ -215,6 +218,8 @@ def get_ai_response(query: str, groq_api_key: str, tavily_api_key: str):
             agents=[research_agent, answer_agent, fact_checker_agent],
             tasks=[research_task, answer_task, fact_check_task],
             verbose=False,
+            max_iter=3,
+            max_rpm=10
         )
         
         # Execute
@@ -234,7 +239,9 @@ def get_ai_response(query: str, groq_api_key: str, tavily_api_key: str):
             return str(result)
             
     except Exception as e:
-        return f"Error: {str(e)}"
+        import traceback
+        error_detail = traceback.format_exc()
+        return f"Error: {str(e)}\n\nDetails:\n{error_detail}"
 
 def main():
     # Header
