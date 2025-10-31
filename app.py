@@ -388,19 +388,60 @@ def main():
         default_groq = os.getenv("GROQ_API_KEY", "")
         default_tavily = os.getenv("TAVILY_API_KEY", "")
         
+        # API Keys Section with helpful links
+        st.markdown("### 🔑 API Keys (FREE)")
+        
+        with st.expander("📖 How to Get FREE API Keys (Click to Expand)", expanded=False):
+            st.markdown("""
+            #### 🚀 Groq API Key (FREE)
+            **Groq offers generous free tier with fast LLM inference:**
+            1. Visit **[Groq Console](https://console.groq.com/)** (opens in new tab)
+            2. Sign up with email (completely free)
+            3. Navigate to **API Keys** section
+            4. Click **"Create API Key"**
+            5. Copy your key and paste it below
+            
+            **Free Tier:** 14,400 requests/day (~1 request/second)
+            
+            #### 🌐 Tavily API Key (FREE)
+            **Tavily provides free tier for web search:**
+            1. Visit **[Tavily AI](https://tavily.com/)** (opens in new tab)
+            2. Click **"Sign Up"** or **"Get Started"**
+            3. Create a free account
+            4. Go to **API Keys** in dashboard
+            5. Generate your API key
+            6. Copy and paste below
+            
+            **Free Tier:** 1,000 searches/month
+            """)
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("[🔗 Get Groq API Key](https://console.groq.com/)")
+            with col2:
+                st.markdown("[🔗 Get Tavily API Key](https://tavily.com/)")
+        
         groq_api_key = st.text_input(
             "🔑 Groq API Key",
             type="password",
             value=default_groq,
-            help="Enter your Groq API key for LLM inference (or set GROQ_API_KEY in .env)"
+            placeholder="gsk_...",
+            help="Enter your Groq API key (get free key: https://console.groq.com/)"
         )
+        
+        if not groq_api_key or groq_api_key.strip() == "":
+            st.caption("💡 Click the expander above to get a FREE Groq API key")
         
         tavily_api_key = st.text_input(
             "🌐 Tavily API Key",
             type="password",
             value=default_tavily,
-            help="Enter your Tavily API key for web search (or set TAVILY_API_KEY in .env)"
+            placeholder="tvly-...",
+            help="Enter your Tavily API key (get free key: https://tavily.com/)"
         )
+        
+        if not tavily_api_key or tavily_api_key.strip() == "":
+            st.caption("💡 Click the expander above to get a FREE Tavily API key")
         
         st.divider()
         
@@ -485,8 +526,9 @@ def main():
     
     # Process query
     if submit_button and query:
-        if not groq_api_key or not tavily_api_key:
+        if not groq_api_key or not tavily_api_key or groq_api_key.strip() == "" or tavily_api_key.strip() == "":
             st.error("❌ Please enter both API keys in the sidebar!")
+            st.info("💡 **Don't have API keys yet?** Expand the 'How to Get FREE API Keys' section in the sidebar for step-by-step instructions!")
             return
         
         # Display progress

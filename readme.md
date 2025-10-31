@@ -294,23 +294,58 @@ Once running, access the application at `http://localhost:8501`
 
 ---
 
-## 📝 API Keys Setup
+## 📝 API Keys Setup (FREE)
 
-### Getting a Groq API Key
+Both API keys are **completely FREE** with generous free tiers!
 
-1. Visit [Groq Console](https://console.groq.com/)
-2. Sign up or log in
-3. Navigate to API Keys section
-4. Create a new API key
-5. Copy and use it in the application
+### Getting a FREE Groq API Key
 
-### Getting a Tavily API Key
+**Groq offers a generous free tier with fast LLM inference:**
 
-1. Visit [Tavily AI](https://tavily.com/)
-2. Sign up for an account
-3. Navigate to API section
-4. Generate your API key
-5. Copy and use it in the application
+1. Visit **[Groq Console](https://console.groq.com/)** 
+2. Sign up with your email (free, no credit card required)
+3. Navigate to **API Keys** section in the dashboard
+4. Click **"Create API Key"**
+5. Copy your key (starts with `gsk_...`)
+6. Paste it in the Streamlit app sidebar
+
+**Free Tier Limits:**
+- ✅ **14,400 requests per day** (~1 request per second)
+- ✅ Fast inference with Llama 3 and Mixtral models
+- ✅ No credit card required
+- ✅ Perfect for development and testing
+
+### Getting a FREE Tavily API Key
+
+**Tavily provides free tier for real-time web search:**
+
+1. Visit **[Tavily AI](https://tavily.com/)**
+2. Click **"Sign Up"** or **"Get Started"**
+3. Create a free account (no credit card needed)
+4. Go to **Dashboard** → **API Keys**
+5. Generate your API key (starts with `tvly-...`)
+6. Copy and paste in the app sidebar
+
+**Free Tier Limits:**
+- ✅ **1,000 searches per month**
+- ✅ Real-time web search
+- ✅ High-quality search results
+- ✅ No credit card required
+
+### Quick Start
+
+1. **Get both API keys** (takes ~5 minutes):
+   - [Get Groq Key](https://console.groq.com/) | [Get Tavily Key](https://tavily.com/)
+
+2. **Add to app**:
+   - Enter keys in the Streamlit sidebar, OR
+   - Create a `.env` file in project root:
+     ```env
+     GROQ_API_KEY=your_groq_key_here
+     TAVILY_API_KEY=your_tavily_key_here
+     ```
+
+3. **Start using!** 🚀
 
 ---
 
