@@ -198,63 +198,105 @@ CRITICAL RULES:
 8. Use formal, objective legal language
 9. If unsure about any fact, state the uncertainty clearly"""
 
-    user_prompt = f"""CRITICAL: Answer this legal question using ONLY information found in the sources below. DO NOT make up facts, cases, or citations.
+    user_prompt = f"""CRITICAL: Answer this legal question using ONLY information found in the sources below. DO NOT make up facts, cases, or citations. ALL cases, statutes, and legal principles MUST be REAL and found in the sources.
 
 Legal Question: {query}
 
-=== RESEARCH SOURCES (Cross-reference these carefully) ===
+=== RESEARCH SOURCES (Cross-reference these carefully - ALL must be REAL) ===
 {sources_text}
 
 === STRICT INSTRUCTIONS ===
 
-**ACCURACY REQUIREMENTS:**
-- BEFORE stating any fact, case name, statute, or legal principle, VERIFY it appears in the sources above
-- If a case name is not in the sources, DO NOT cite it
-- If a statute section is not mentioned in the sources, DO NOT cite it
+**CRITICAL ACCURACY REQUIREMENTS:**
+- BEFORE stating any fact, case name, statute, or legal principle, VERIFY it appears EXACTLY in the sources above
+- If a case name is not in the sources, DO NOT cite it - DO NOT INVENT CASES
+- If a statute section is not mentioned in the sources, DO NOT cite it - DO NOT INVENT STATUTES
+- ALL case names, statute names, and legal principles MUST be extracted EXACTLY as they appear in the sources
 - Cross-check information across multiple sources for consistency
-- If sources contradict each other, acknowledge the contradiction
+- If sources contradict each other, acknowledge the contradiction explicitly
+- DO NOT use any information not found in the sources - this is MANDATORY
 
 **IRAC STRUCTURE:**
 
-## Issue
-- Identify core legal issue(s) and sub-issues
-- State parties clearly
+Issue
+- DO NOT use ## or bold formatting for "Issue"
+- Identify core legal issue(s) and sub-issues clearly
+- State parties clearly (claimant, defendant, etc.)
 - ONLY identify issues that can be addressed with information from sources
+- Be precise and specific
 
-## Rule
-- State legal principles found in the sources
-- For statutes: Cite exact sections ONLY if found in sources (format: "s.X of the [Act Name]")
-- For cases: Use OSCOLA format ONLY if the case is mentioned in sources
-  - Format: "Case Name [Year] Volume Reporter Page" (e.g., "Entores v Miles Far East Corp [1955] 2 QB 327")
-- If a case is mentioned without full citation, use what is provided
-- Include academic sources where found in sources
+Rule
+- State legal principles found in the sources with FULL OSCOLA citations
+- For statutes: Cite exact sections ONLY if found in sources with full citation format: (Act Name, s.X(subsection))
+  - Example: (Occupiers' Liability Act 1957, s.2(1))
+  - MUST include the exact section number as it appears in sources
+- For cases: Use COMPLETE OSCOLA format ONLY if the case is mentioned in sources
+  - Format: (Case Name [Year] Volume Reporter Page)
+  - Example: (Entores v Miles Far East Corp [1955] 2 QB 327)
+  - If full citation is in sources, use it exactly as provided
+  - If only partial citation, use what is provided but note if incomplete
+- Include academic sources where found in sources with proper citation
 - If a legal principle is not in sources, state: "The sources do not provide the legal rule on this point"
+- EVERY rule statement MUST have a citation from the sources
 
-## Analysis
-- Link facts from the question to legal rules found in sources
-- Apply rules from sources to facts
-- Argue both sides using principles from sources
-- State what a court would likely hold based on sources
-- Every assertion MUST reference a source
-- If analysis requires information not in sources, state this limitation
+Analysis
+- This is the MOST CRITICAL section - analyze word-by-word, fact-by-fact
+- NO MISSING DETAILS - examine every fact in the question carefully
+- Link EACH specific fact from the question to specific legal rules found in sources
+  - Quote the exact fact: "The fact that [quote exact words from question] relates to [legal rule]"
+  - Apply rules from sources to facts with precision
+- Apply rules to facts systematically:
+  - Take each fact word-by-word
+  - Identify which legal rule applies (with citation)
+  - Explain how the fact satisfies or fails to satisfy each element of the rule
+- Argue both sides using principles from sources:
+  - Claimant's argument: [specific argument with source citation]
+  - Defendant's counter-argument: [specific counter-argument with source citation]
+- Analyze every element of each legal test:
+  - If duty of care: analyze proximity, foreseeability, fairness (with citations)
+  - If breach: analyze reasonable person standard, factual circumstances (with citations)
+  - If causation: analyze factual causation, legal causation (with citations)
+  - Continue for ALL elements
+- State what a court would likely hold based on sources, with justification
+- Every single assertion MUST have a FULL OSCOLA citation from sources
+- Use specific quotations from the question: "The question states '[exact quote]', which indicates..."
+- If analysis requires information not in sources, state this limitation explicitly
+- Cross-reference multiple sources when analyzing complex points
 
-## Conclusion
+Conclusion
 - Direct answer to the issue(s) based on sources
 - Summarize without introducing new arguments
-- Advise on likely legal position based on available sources
-- If conclusion is limited by missing information, state this
+- Advise on likely legal position based on available sources with citation support
+- If conclusion is limited by missing information, state this clearly
 
-**CITATION FORMAT:**
-- Use OSCOLA citations in parentheses: (Case Name [Year] Volume Reporter Page)
-- For statutes: (Act Name, s.X)
+**CITATION FORMAT (MANDATORY):**
+- Use FULL OSCOLA citations in parentheses for EVERY legal point
+- Cases: (Case Name [Year] Volume Reporter Page) - MUST be from sources
+- Statutes: (Act Name, s.X) - MUST be from sources
+- Academic sources: (Author, "Title" [Year] Journal Volume Page) - MUST be from sources
 - Reference source by number when appropriate: (Source 1), (Source 3)
+- NO CITATIONS to cases/statutes not found in sources - this is PROHIBITED
+
+**FACT ANALYSIS REQUIREMENTS:**
+- Read the question word-by-word
+- Identify EVERY fact stated or implied
+- Analyze EACH fact against relevant legal rules
+- Quote exact wording from the question when making points
+- Do not skip or miss any details
+- If a fact is ambiguous, identify both interpretations and analyze both
+- Show how each fact affects the legal analysis
 
 **IF INFORMATION IS MISSING:**
 - If sources don't contain sufficient information on a legal point, explicitly state: "The available sources do not provide sufficient information to address [specific point]"
 - DO NOT speculate or use general knowledge beyond what is in sources
-- Be transparent about limitations
+- Be transparent about limitations in analysis
 
-Generate your answer now, ensuring EVERY claim is verified against the sources:"""
+Generate your answer now, ensuring:
+1. EVERY claim is verified against the sources
+2. ALL citations are REAL and from sources
+3. Analysis is word-by-word, fact-by-fact with no missing details
+4. Issue section has no ## or bold formatting
+5. Rule and Analysis have FULL OSCOLA citations for every legal point"""
 
     try:
         completion = groq_client.chat.completions.create(
