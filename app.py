@@ -15,9 +15,49 @@ import re
 import io
 from pypdf import PdfReader
 from docx import Document
+import glob
+import json
+from pathlib import Path
+
+# RAG imports
+try:
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
+    try:
+        # Try new import path (langchain >= 0.1.0)
+        from langchain_community.embeddings import HuggingFaceEmbeddings
+        from langchain_community.vectorstores import FAISS
+        from langchain_core.documents import Document as LangchainDocument
+    except ImportError:
+        # Fallback to old import path
+        from langchain.embeddings import HuggingFaceEmbeddings
+        from langchain.vectorstores import FAISS
+        from langchain.docstore.document import Document as LangchainDocument
+    RAG_AVAILABLE = True
+except ImportError:
+    RAG_AVAILABLE = False
+    # Only show warning once
+    if 'rag_warning_shown' not in st.session_state:
+        st.session_state.rag_warning_shown = True
+        st.warning("⚠️ RAG libraries not fully installed. RAG features will be limited. Run: pip install -r requirements.txt")
 
 # Load environment variables
 load_dotenv()
+
+# Free Law Database URLs (from https://commonslibrary.parliament.uk/resources/legal-research-databases/)
+FREE_LAW_DATABASES = {
+    "BAILII": "https://www.bailii.org/",
+    "Legislation.gov.uk": "https://www.legislation.gov.uk/",
+    "British and Irish Legal Information Institute": "https://www.bailii.org/",
+    "The National Archives": "https://www.nationalarchives.gov.uk/",
+    "Courts and Tribunals Judiciary": "https://www.judiciary.uk/",
+    "UK Parliament": "https://www.parliament.uk/",
+    "Supreme Court": "https://www.supremecourt.uk/",
+    "Legal Information Institute (Cornell)": "https://www.law.cornell.edu/",
+    "Google Scholar": "https://scholar.google.com/",
+    "SSRN Legal": "https://www.ssrn.com/",
+    "Justis": "https://www.justis.com/",
+    "Westlaw UK (free cases)": "https://www.westlaw.co.uk/",
+}
 
 # Page configuration
 st.set_page_config(
@@ -64,6 +104,175 @@ if 'tavily_api_key' not in st.session_state:
 
 if 'uploaded_documents' not in st.session_state:
     st.session_state.uploaded_documents = []  # List of {name: str, content: str}
+
+if 'rag_vectorstore' not in st.session_state:
+    st.session_state.rag_vectorstore = None
+
+if 'rag_initialized' not in st.session_state:
+    st.session_state.rag_initialized = False
+
+def initialize_rag_knowledge_base():
+    """Initialize RAG knowledge base from law_resources folder"""
+    if not RAG_AVAILABLE:
+        return None
+    
+    if st.session_state.rag_initialized and st.session_state.rag_vectorstore is not None:
+        return st.session_state.rag_vectorstore
+    
+    try:
+        law_resources_path = Path("law_resources")
+        if not law_resources_path.exists():
+            return None
+        
+        # Load all documents from law_resources folder
+        documents = []
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200,
+            length_function=len
+        )
+        
+        # Load from all subdirectories
+        for file_path in law_resources_path.rglob("*"):
+            if file_path.is_file():
+                try:
+                    if file_path.suffix.lower() == '.pdf':
+                        with open(file_path, 'rb') as f:
+                            text = extract_text_from_pdf(f)
+                    elif file_path.suffix.lower() in ['.txt', '.md']:
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            text = f.read()
+                    elif file_path.suffix.lower() in ['.docx', '.doc']:
+                        with open(file_path, 'rb') as f:
+                            text = extract_text_from_docx(f)
+                    else:
+                        continue
+                    
+                    if text and len(text.strip()) > 50:
+                        chunks = text_splitter.split_text(text)
+                        for chunk in chunks:
+                            doc = LangchainDocument(
+                                page_content=chunk,
+                                metadata={"source": str(file_path), "type": file_path.parent.name}
+                            )
+                            documents.append(doc)
+                except Exception as e:
+                    continue
+        
+        if not documents:
+            return None
+        
+        # Create embeddings and vectorstore
+        embeddings = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2"
+        )
+        vectorstore = FAISS.from_documents(documents, embeddings)
+        
+        st.session_state.rag_vectorstore = vectorstore
+        st.session_state.rag_initialized = True
+        return vectorstore
+    except Exception as e:
+        return None
+
+def retrieve_from_rag(query: str, k: int = 5) -> List[Dict]:
+    """Retrieve relevant documents from RAG knowledge base"""
+    vectorstore = initialize_rag_knowledge_base()
+    if vectorstore is None:
+        return []
+    
+    try:
+        docs = vectorstore.similarity_search(query, k=k)
+        retrieved_docs = []
+        for i, doc in enumerate(docs):
+            retrieved_docs.append({
+                'title': f"Knowledge Base: {doc.metadata.get('source', 'Document')}",
+                'url': doc.metadata.get('source', ''),
+                'content': doc.page_content,
+                'type': doc.metadata.get('type', 'general')
+            })
+        return retrieved_docs
+    except Exception as e:
+        return []
+
+def detect_hallucination(response: str, sources: List[Dict], groq_client: Groq, model: str) -> Tuple[bool, str]:
+    """Detect potential hallucinations in the response by cross-checking with sources"""
+    if not sources:
+        return False, "No sources to verify against"
+    
+    # Extract claims from response (cases, statutes, key facts)
+    source_text = "\n\n".join([f"Source {i+1}: {s.get('content', '')[:500]}" for i, s in enumerate(sources[:10])])
+    
+    verification_prompt = f"""You are a fact-checker. Analyze the response below and identify any claims (case names, statute names, legal principles, specific facts) that cannot be verified in the provided sources.
+
+Response to verify:
+{response[:2000]}
+
+Available sources:
+{source_text}
+
+Task: List any claims in the response that are NOT found in the sources above. If all claims appear to be in sources, respond with "NO HALLUCINATIONS DETECTED".
+
+Format your response as:
+- Claim: [the claim that cannot be verified]
+- Issue: [why it cannot be verified]
+
+If no hallucinations, just say "NO HALLUCINATIONS DETECTED"."""
+    
+    try:
+        completion = groq_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are a strict fact-checker. Only flag claims that are clearly not in the sources."},
+                {"role": "user", "content": verification_prompt}
+            ],
+            temperature=0.1,
+            max_tokens=500
+        )
+        result = completion.choices[0].message.content
+        has_hallucination = "NO HALLUCINATIONS" not in result.upper()
+        return has_hallucination, result
+    except Exception as e:
+        return False, f"Verification error: {str(e)}"
+
+def search_free_law_databases(query: str, tavily_client: TavilyClient) -> List[Dict]:
+    """Search free law databases using Tavily with specific site filters"""
+    all_results = []
+    seen_urls = set()
+    
+    # Search queries targeting free law databases
+    search_queries = [
+        f"{query} site:bailii.org",
+        f"{query} site:legislation.gov.uk",
+        f"{query} site:scholar.google.com",
+        f"{query} site:law.cornell.edu",
+        f"{query} site:judiciary.uk",
+        f"{query} site:supremecourt.uk",
+        f"{query} site:parliament.uk",
+    ]
+    
+    for search_query in search_queries[:5]:  # Limit to avoid rate limits
+        try:
+            response = tavily_client.search(
+                query=search_query,
+                max_results=3,
+                search_depth="advanced"
+            )
+            
+            if 'results' in response:
+                for result in response['results']:
+                    url = result.get('url', '')
+                    if url and url not in seen_urls:
+                        all_results.append({
+                            'title': result.get('title', 'No title'),
+                            'url': url,
+                            'content': result.get('content', 'No content'),
+                            'source_type': 'free_law_db'
+                        })
+                        seen_urls.add(url)
+        except Exception as e:
+            continue
+    
+    return all_results[:10]
 
 def is_law_question(query: str) -> bool:
     """Detect if a question is law-related"""
@@ -186,10 +395,26 @@ def search_web(query: str, tavily_client: TavilyClient, max_results: int = 5, se
     except Exception as e:
         return (f"Error searching web: {str(e)}", [])
 
-def comprehensive_search(query: str, tavily_client: TavilyClient, search_type: str = "general") -> List[Dict]:
-    """Perform comprehensive multi-query search for maximum accuracy"""
+def comprehensive_search(query: str, tavily_client: TavilyClient, search_type: str = "general", include_rag: bool = True) -> List[Dict]:
+    """Perform comprehensive multi-query search for maximum accuracy with RAG and free law databases"""
     all_sources = []
     seen_urls = set()  # Avoid duplicates
+    
+    # Retrieve from RAG knowledge base first (law_resources folder)
+    if include_rag and search_type == "law":
+        rag_docs = retrieve_from_rag(query, k=5)
+        for doc in rag_docs:
+            if doc['url'] not in seen_urls:
+                all_sources.append(doc)
+                seen_urls.add(doc['url'])
+    
+    # Search free law databases
+    if search_type == "law":
+        free_db_results = search_free_law_databases(query, tavily_client)
+        for result in free_db_results:
+            if result['url'] not in seen_urls:
+                all_sources.append(result)
+                seen_urls.add(result['url'])
     
     # For law questions, do multiple specialized searches
     if search_type == "law":
@@ -222,7 +447,7 @@ def comprehensive_search(query: str, tavily_client: TavilyClient, search_type: s
         except Exception as e:
             continue  # Continue with other searches if one fails
     
-    return all_sources[:20]  # Return up to 20 unique sources
+    return all_sources[:25]  # Return up to 25 unique sources
 
 def format_oscola_citation(case_name: str, year: str = "", volume: str = "", reporter: str = "", page: str = "") -> str:
     """Format a case citation in OSCOLA style"""
@@ -236,20 +461,20 @@ def format_oscola_citation(case_name: str, year: str = "", volume: str = "", rep
         return case_name
 
 def get_law_answer(query: str, groq_client: Groq, tavily_client: TavilyClient, model: str, initial_sources: List[Dict]) -> str:
-    """Generate a law answer following IRAC structure with OSCOLA citations and comprehensive fact-checking"""
+    """Generate a law answer following IRAC structure with OSCOLA citations, RAG, and comprehensive fact-checking"""
     
-    # Perform comprehensive multi-source search
-    with st.spinner("🔍 Performing comprehensive legal database search..."):
-        all_sources = comprehensive_search(query, tavily_client, search_type="law")
+    # Perform comprehensive multi-source search (includes RAG, free law databases, and web)
+    with st.spinner("🔍 Performing comprehensive legal database search (RAG + Free Databases + Web)..."):
+        all_sources = comprehensive_search(query, tavily_client, search_type="law", include_rag=True)
         # Merge with initial sources
-        seen_urls = {s['url'] for s in all_sources}
+        seen_urls = {s.get('url', '') for s in all_sources}
         for source in initial_sources:
-            if source['url'] not in seen_urls:
+            if source.get('url', '') not in seen_urls:
                 all_sources.append(source)
-                seen_urls.add(source['url'])
+                seen_urls.add(source.get('url', ''))
     
     # Remove duplicates and limit to most relevant sources
-    all_sources = all_sources[:15]
+    all_sources = all_sources[:20]
     
     # Format sources with full content for better context
     sources_text = "\n\n".join([
@@ -257,35 +482,77 @@ def get_law_answer(query: str, groq_client: Groq, tavily_client: TavilyClient, m
         for i, s in enumerate(all_sources)
     ])
     
-    # Create comprehensive law-specific prompt with strict accuracy requirements
-    system_prompt = """You are a legal expert AI assistant specializing in formal legal analysis with STRICT ACCURACY requirements.
-CRITICAL RULES:
+    # Create comprehensive law-specific prompt with 90+ style and strict accuracy requirements
+    system_prompt = """You are an exceptional legal scholar AI assistant specializing in 90+ quality legal analysis. Your answers should demonstrate originality, deep synthesis, and strategic reframing while maintaining STRICT ACCURACY.
+
+CRITICAL RULES - ACCURACY FIRST:
 1. You MUST ONLY state facts, cases, statutes, or legal principles that are EXPLICITLY found in the provided sources
 2. You MUST cross-reference information across multiple sources before stating it as fact
-3. If multiple sources conflict, you MUST state this conflict explicitly
+3. If multiple sources conflict, you MUST state this conflict explicitly and analyze the tension
 4. If information is not found in sources, you MUST state "The sources do not provide sufficient information on this point"
-5. You MUST follow IRAC (Issue, Rule, Analysis, Conclusion) methodology
-6. You MUST use OSCOLA citation format for ALL cases and statutes
-7. ALL citations must be VERIFIED from the sources - NO FABRICATED CITATIONS
-8. Use formal, objective legal language like a professional lawyer
-9. If unsure about any fact, state the uncertainty clearly
-10. GRAMMAR AND WRITING REQUIREMENTS:
-    - Grammar MUST be accurate and professional
-    - Answer MUST be comprehensive - address ALL aspects of the issue
-    - Logic MUST be complete - no missing logical steps
-    - If you start discussing an issue, you MUST complete the analysis to the end
-    - Use precise legal terminology
-    - Ensure proper sentence structure and flow
-    - Every paragraph must logically connect to the next"""
+5. ALL citations must be VERIFIED from the sources - NO FABRICATED CITATIONS
+6. Use formal, objective legal language like a leading academic lawyer
+7. If unsure about any fact, state the uncertainty clearly
 
-    user_prompt = f"""CRITICAL: Answer this legal question using ONLY information found in the sources below. DO NOT make up facts, cases, or citations. ALL cases, statutes, and legal principles MUST be REAL and found in the sources.
+90+ ESSAY QUALITY REQUIREMENTS:
+
+**The "A-ha!" Thesis (Strategic Synthesis):**
+- Your introduction doesn't just state an argument; it presents a genuinely novel insight
+- Synthesize seemingly disparate concepts to create a new lens through which to view the problem
+- Example approach: "The very premise of this statement is flawed. The debate between X and Y misses the true issue: [reframed understanding]. This analysis will reframe the issue not as [common view] but as [novel perspective], a concept the law has yet to fully grapple with."
+- You are not just answering the question; you are reframing the question when appropriate
+
+**Beyond Surface Reading (Deep Research):**
+- Show you've gone beyond basic sources - cite from specialized journals, comparative law, interdisciplinary perspectives
+- Seamlessly draw on other jurisdictions: "While the CJEU adopted this approach, the US approach in [Case] reveals the conceptual weakness..."
+- Use niche sources (specialized journals) that add unique value, not just standard cases
+- Reference economic, philosophical, or comparative perspectives where relevant
+
+**Flawless, Thematic Structure:**
+- Structure driven entirely by your thesis, not a rigid template
+- You might abandon point-by-point for thematic organization:
+  * Section 1: Deconstructing the "Common" Illusion (Why X vs Y is the wrong debate)
+  * Section 2: The "Procedural" Gap (Drawing on administrative law principles)
+  * Section 3: Applying the New Framework (How this lens solves the problem)
+- Every section serves the overarching argument
+
+**"Voice" and Scholarly Writing:**
+- Elegant, concise, authoritative - zero "waffle"
+- Every word serves the argument
+- Tone: confident, scholarly, persuasive
+- Complexity articulated with absolute clarity
+
+**Problem Question Excellence:**
+- Flawless issue spotting AND triage (prioritize determinative issues)
+- "While there is a potential issue of [minor point], it is uncontentious/would likely fail for [one-sentence reason]. The determinative questions are..."
+- Don't just apply rules - problematize the application:
+  * "The ratio of Case X seems to apply. However, the facts here are novel. A court would be forced to distinguish X on the basis that... This creates a legal tension with Case Y. A judge would likely have to [weigh competing principles]. Given [policy imperative Z], the court would likely conclude..."
+- Think like a judge writing the opinion or a barrister anticipating counter-arguments
+- Decisive, justified conclusion (no fence-sitting)
+
+⛔ AVOID:
+- Irrelevant originality (novel thesis must answer the question)
+- Complexity for its own sake (clarity is intelligence)
+- "Laundry list" of citations (curated, precise citations only)
+- Missing obvious points in pursuit of originality (do 75+ work perfectly, then add 90+ layer)
+
+GRAMMAR AND WRITING REQUIREMENTS:
+- Grammar MUST be accurate and professional
+- Answer MUST be comprehensive - address ALL aspects of the issue
+- Logic MUST be complete - no missing logical steps
+- If you start discussing an issue, you MUST complete the analysis to the end
+- Use precise legal terminology
+- Ensure proper sentence structure and flow
+- Every paragraph must logically connect to the next"""
+
+    user_prompt = f"""CRITICAL: Answer this legal question using ONLY information found in the sources below. Demonstrate 90+ essay quality: strategic synthesis, deep research integration, and original insights while maintaining absolute accuracy. DO NOT make up facts, cases, or citations. ALL cases, statutes, and legal principles MUST be REAL and found in the sources.
 
 Legal Question: {query}
 
 === RESEARCH SOURCES (Cross-reference these carefully - ALL must be REAL) ===
 {sources_text}
 
-=== STRICT INSTRUCTIONS ===
+=== 90+ QUALITY INSTRUCTIONS ===
 
 **CRITICAL ACCURACY REQUIREMENTS:**
 - BEFORE stating any fact, case name, statute, or legal principle, VERIFY it appears EXACTLY in the sources above
@@ -392,6 +659,14 @@ Generate your answer now, ensuring:
         
         response = completion.choices[0].message.content
         
+        # Perform hallucination detection
+        with st.spinner("🔍 Fact-checking response against sources to prevent hallucinations..."):
+            has_hallucination, verification_result = detect_hallucination(response, all_sources, groq_client, model)
+            if has_hallucination:
+                # Add warning about potential unverified claims
+                warning = "\n\n---\n\n**⚠️ FACT-CHECK ALERT:** Some claims may not be fully verifiable in the provided sources. Please verify:\n\n"
+                response = response + warning + f"*{verification_result}*\n\n*Always cross-reference claims with original sources.*"
+        
         # Add legal advice disclaimer if advice was requested
         if is_advice_request(query):
             disclaimer = "\n\n---\n\n**⚠️ LEGAL DISCLAIMER:**\n\nThis response is provided for informational and educational purposes only. It does not constitute professional legal advice and should not be relied upon as such. The information provided is not from a qualified legal professional, and no legal responsibility is assumed. For specific legal matters, please consult with a qualified solicitor or barrister who can provide professional legal advice tailored to your circumstances."
@@ -399,9 +674,25 @@ Generate your answer now, ensuring:
         
         # Add source links section at the end
         if all_sources:
-            response += "\n\n---\n\n**📚 Sources Referenced:**\n\n"
-            for i, source in enumerate(all_sources[:10], 1):
-                response += f"{i}. [{source['title']}]({source['url']})\n"
+            response += "\n\n---\n\n**📚 Sources Consulted (RAG + Free Databases + Web):**\n\n"
+            for i, source in enumerate(all_sources[:15], 1):
+                source_name = source.get('title', 'Unknown Source')
+                source_url = source.get('url', '')
+                source_type = source.get('type', source.get('source_type', 'web'))
+                
+                if source_url and source_url.startswith('http'):
+                    response += f"{i}. [{source_name}]({source_url})"
+                else:
+                    response += f"{i}. {source_name}"
+                
+                # Mark source type
+                if 'Knowledge Base' in source_name or source_type == 'general':
+                    response += " 📚 (Personal Knowledge Base/RAG)"
+                elif source_type == 'free_law_db':
+                    response += " ⚖️ (Free Law Database)"
+                else:
+                    response += " 🌐 (Web Source)"
+                response += "\n"
         
         return response
     except Exception as e:
@@ -523,10 +814,10 @@ def get_answer_with_documents(query: str, groq_client: Groq, tavily_client: Tavi
         for i, doc in enumerate(documents, 1):
             doc_sources_text += f"--- Document {i}: {doc['name']} ---\n{doc['content'][:2000]}...\n\n"
     
-    # Perform web search
-    with st.spinner("🔍 Searching web and cross-referencing with uploaded documents..."):
+    # Perform web search (includes RAG and free law databases for law questions)
+    with st.spinner("🔍 Searching (RAG + Free Databases + Web) and cross-referencing with uploaded documents..."):
         web_results, web_sources = search_web(query, tavily_client, max_results=8 if is_law else 5, search_type="law" if is_law else "general")
-        all_web_sources = comprehensive_search(query, tavily_client, search_type="law" if is_law else "general")
+        all_web_sources = comprehensive_search(query, tavily_client, search_type="law" if is_law else "general", include_rag=is_law)
         
         # Combine all sources
         seen_urls = {s['url'] for s in all_web_sources}
